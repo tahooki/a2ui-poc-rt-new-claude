@@ -1,6 +1,11 @@
 import { NextResponse } from "next/server";
 import { getCurrentScenarioId } from "@/server/db";
-import { getAllA2UITemplates, getA2UITemplateOverrides, getA2UITemplateRules } from "@/server/db";
+import {
+  getAllA2UITemplates,
+  getA2UITemplateDecisionInputs,
+  getA2UITemplateOverrides,
+  getA2UITemplateRules,
+} from "@/server/db";
 import { listScenarios } from "@/server/scenarios";
 
 export async function GET() {
@@ -9,6 +14,7 @@ export async function GET() {
     const templates = getAllA2UITemplates();
     const rules = getA2UITemplateRules();
     const overrides = getA2UITemplateOverrides();
+    const decisionInputs = getA2UITemplateDecisionInputs();
 
     const rulesByTemplate = (rules as Array<Record<string, unknown>>).reduce<
       Record<string, Array<Record<string, unknown>>>
@@ -28,6 +34,18 @@ export async function GET() {
       return acc;
     }, {});
 
+    const decisionInputsByTemplate = (
+      decisionInputs as Array<Record<string, unknown>>
+    ).reduce<Record<string, Array<Record<string, unknown>>>>(
+      (acc, inputDef) => {
+        const templateId = String(inputDef["template_id"] ?? "");
+        acc[templateId] ??= [];
+        acc[templateId].push(inputDef);
+        return acc;
+      },
+      {},
+    );
+
     const items = (templates as Array<Record<string, unknown>>).map((template) => {
       const templateId = String(template["id"] ?? "");
       const templateOverrides = overridesByTemplate[templateId] ?? [];
@@ -41,6 +59,7 @@ export async function GET() {
         ...template,
         rules: rulesByTemplate[templateId] ?? [],
         overrides: templateOverrides,
+        decision_inputs: decisionInputsByTemplate[templateId] ?? [],
         scenario_override_enabled:
           scenarioOverride && typeof scenarioOverride["enabled"] === "number"
             ? Number(scenarioOverride["enabled"]) === 1

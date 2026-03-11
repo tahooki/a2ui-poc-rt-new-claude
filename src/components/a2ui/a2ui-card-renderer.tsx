@@ -138,12 +138,26 @@ interface A2UICardRendererProps {
   onAction?: (actionName: string, context: Record<string, unknown>) => void;
 }
 
+interface A2UIDecisionContext {
+  templateId?: string;
+  toolName?: string;
+  strategy?: string;
+  confidence?: number;
+  decisionReason?: string;
+  matchedSignals?: string[];
+  missingInputs?: string[];
+  collectedInputs?: Record<string, unknown>;
+}
+
 export function A2UICardRenderer({
   cardType,
   cardData,
   onAction,
 }: A2UICardRendererProps) {
   const cardDef = buildCardDef(cardType, cardData);
+  const decisionContext = (
+    cardData["_a2uiDecisionContext"] as A2UIDecisionContext | undefined
+  ) ?? null;
 
   if (!cardDef) {
     return (
@@ -165,13 +179,41 @@ export function A2UICardRenderer({
             </span>
           </div>
         )}
+        {decisionContext && (
+          <div className="border-b border-border/30 bg-muted/20 px-3 py-2">
+            <div className="flex items-center gap-2 text-[10px] uppercase tracking-wider text-muted-foreground">
+              <span className="font-medium">Decision</span>
+              {typeof decisionContext.confidence === "number" && (
+                <span className="font-mono">
+                  {(decisionContext.confidence * 100).toFixed(0)}%
+                </span>
+              )}
+            </div>
+            {decisionContext.decisionReason && (
+              <p className="mt-1 text-xs text-foreground">
+                {decisionContext.decisionReason}
+              </p>
+            )}
+          </div>
+        )}
         <A2UIViewer
           root={cardDef.root}
           components={cardDef.components}
           data={cardDef.data}
           onAction={(action) => {
             if (onAction) {
-              onAction(action.actionName, action.context ?? {});
+              onAction(action.actionName, {
+                ...(action.context ?? {}),
+                ...(decisionContext?.templateId
+                  ? { _a2uiTemplateId: decisionContext.templateId }
+                  : {}),
+                ...(decisionContext?.toolName
+                  ? { _a2uiToolName: decisionContext.toolName }
+                  : {}),
+                ...(typeof decisionContext?.confidence === "number"
+                  ? { _a2uiDecisionConfidence: decisionContext.confidence }
+                  : {}),
+              });
             }
           }}
         />

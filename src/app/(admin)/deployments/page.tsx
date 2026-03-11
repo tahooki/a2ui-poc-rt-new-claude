@@ -23,6 +23,7 @@ import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Input } from "@/components/ui/input";
 import { useOperator } from "@/lib/operators";
+import { useSyncSelectedEntity } from "@/lib/selected-entity";
 import { cn } from "@/lib/utils";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -811,6 +812,7 @@ export default function DeploymentsPage() {
   }, [fetchDeployments]);
 
   const selected = deployments.find((d) => d.id === selectedId) ?? null;
+  useSyncSelectedEntity(selectedId);
 
   return (
     <div className="flex flex-1 flex-col p-6 gap-6 min-h-0">

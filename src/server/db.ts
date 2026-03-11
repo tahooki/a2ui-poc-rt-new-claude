@@ -273,6 +273,19 @@ function initSchema(db: Database.Database) {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    CREATE TABLE IF NOT EXISTS a2ui_template_decision_inputs (
+      id TEXT PRIMARY KEY,
+      template_id TEXT NOT NULL REFERENCES a2ui_templates(id),
+      input_key TEXT NOT NULL,
+      label TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      required INTEGER NOT NULL DEFAULT 0,
+      source TEXT NOT NULL CHECK(source IN ('user','context','derived')),
+      default_value TEXT,
+      priority INTEGER NOT NULL DEFAULT 100,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     CREATE TABLE IF NOT EXISTS a2ui_template_overrides (
       id TEXT PRIMARY KEY,
       template_id TEXT NOT NULL REFERENCES a2ui_templates(id),
@@ -292,6 +305,7 @@ function initSchema(db: Database.Database) {
       operator_id TEXT,
       user_message TEXT NOT NULL DEFAULT '',
       selection_reason TEXT NOT NULL DEFAULT '',
+      decision_payload TEXT,
       status TEXT NOT NULL CHECK(status IN ('selected','blocked','fallback')) DEFAULT 'selected',
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
@@ -305,9 +319,17 @@ function initSchema(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_audit_logs_actor ON audit_logs(actor_id);
     CREATE INDEX IF NOT EXISTS idx_job_runs_status ON job_runs(status);
     CREATE INDEX IF NOT EXISTS idx_a2ui_rules_template ON a2ui_template_rules(template_id);
+    CREATE INDEX IF NOT EXISTS idx_a2ui_decision_inputs_template ON a2ui_template_decision_inputs(template_id);
     CREATE INDEX IF NOT EXISTS idx_a2ui_overrides_template ON a2ui_template_overrides(template_id);
     CREATE INDEX IF NOT EXISTS idx_a2ui_selection_logs_template ON a2ui_template_selection_logs(template_id);
   `);
+
+  // Backward-compatible migration for existing DB files.
+  try {
+    db.prepare('SELECT decision_payload FROM a2ui_template_selection_logs LIMIT 1').get();
+  } catch {
+    db.exec('ALTER TABLE a2ui_template_selection_logs ADD COLUMN decision_payload TEXT');
+  }
 }
 
 function ensureSystemSeed(db: Database.Database) {
@@ -355,6 +377,21 @@ function ensureSystemSeed(db: Database.Database) {
      VALUES
       (@id, @template_id, @scope_type, @scope_value, @enabled, datetime('now'), datetime('now'))
      ON CONFLICT(id) DO NOTHING`,
+  );
+
+  const insertDecisionInput = db.prepare(
+    `INSERT INTO a2ui_template_decision_inputs
+      (id, template_id, input_key, label, description, required, source, default_value, priority, created_at)
+     VALUES
+      (@id, @template_id, @input_key, @label, @description, @required, @source, @default_value, @priority, datetime('now'))
+     ON CONFLICT(id) DO UPDATE SET
+      input_key = excluded.input_key,
+      label = excluded.label,
+      description = excluded.description,
+      required = excluded.required,
+      source = excluded.source,
+      default_value = excluded.default_value,
+      priority = excluded.priority`,
   );
 
   const transaction = db.transaction(() => {
@@ -406,6 +443,20 @@ function ensureSystemSeed(db: Database.Database) {
           rule_type: 'role',
           rule_value: role,
           priority: 10 + index,
+        });
+      });
+
+      template.decisionInputs?.forEach((inputDef, index) => {
+        insertDecisionInput.run({
+          id: `${template.id}_decision_input_${inputDef.key}`,
+          template_id: template.id,
+          input_key: inputDef.key,
+          label: inputDef.label,
+          description: inputDef.description,
+          required: inputDef.required ? 1 : 0,
+          source: inputDef.source,
+          default_value: inputDef.defaultValue ?? null,
+          priority: inputDef.priority ?? 100 + index,
         });
       });
     }
@@ -601,12 +652,61 @@ export function setRuntimeState(key: string, value: string) {
     .run(key, value);
 }
 
+export function clearRuntimeState(key: string) {
+  getDb().prepare('DELETE FROM app_runtime_state WHERE key = ?').run(key);
+}
+
 export function getCurrentScenarioId() {
   return getRuntimeState('current_scenario_id')?.value ?? DEFAULT_RUNTIME_SCENARIO_ID;
 }
 
 export function setCurrentScenarioId(scenarioId: string) {
   setRuntimeState('current_scenario_id', scenarioId);
+}
+
+interface PendingTemplateDecisionState {
+  originalUserText: string;
+  scenarioId: string;
+  candidateTemplateIds: string[];
+  createdAt: string;
+}
+
+function getPendingTemplateDecisionKey(operatorId: string, page: string) {
+  return `pending_template_decision:${operatorId}:${page}`;
+}
+
+export function getPendingTemplateDecisionState(
+  operatorId: string,
+  page: string,
+): PendingTemplateDecisionState | null {
+  const record = getRuntimeState(getPendingTemplateDecisionKey(operatorId, page));
+  if (!record?.value) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(record.value) as PendingTemplateDecisionState;
+  } catch {
+    return null;
+  }
+}
+
+export function setPendingTemplateDecisionState(
+  operatorId: string,
+  page: string,
+  state: PendingTemplateDecisionState,
+) {
+  setRuntimeState(
+    getPendingTemplateDecisionKey(operatorId, page),
+    JSON.stringify(state),
+  );
+}
+
+export function clearPendingTemplateDecisionState(
+  operatorId: string,
+  page: string,
+) {
+  clearRuntimeState(getPendingTemplateDecisionKey(operatorId, page));
 }
 
 // ─── A2UI template helpers ───
@@ -653,6 +753,22 @@ export function getA2UITemplateOverrides(templateId?: string) {
     .all() as Array<Record<string, unknown>>;
 }
 
+export function getA2UITemplateDecisionInputs(templateId?: string) {
+  if (templateId) {
+    return getDb()
+      .prepare(
+        'SELECT * FROM a2ui_template_decision_inputs WHERE template_id = ? ORDER BY priority ASC, id ASC',
+      )
+      .all(templateId) as Array<Record<string, unknown>>;
+  }
+
+  return getDb()
+    .prepare(
+      'SELECT * FROM a2ui_template_decision_inputs ORDER BY template_id ASC, priority ASC, id ASC',
+    )
+    .all() as Array<Record<string, unknown>>;
+}
+
 export function updateA2UITemplateEnabled(id: string, enabled: boolean) {
   getDb()
     .prepare("UPDATE a2ui_templates SET is_enabled = ?, updated_at = datetime('now') WHERE id = ?")
@@ -694,13 +810,14 @@ export function logA2UITemplateSelection(input: {
   operatorId?: string | null;
   userMessage?: string;
   selectionReason?: string;
+  decisionPayload?: unknown;
   status: 'selected' | 'blocked' | 'fallback';
 }) {
   getDb()
     .prepare(
       `INSERT INTO a2ui_template_selection_logs
-        (id, template_id, thread_id, page, scenario_id, operator_id, user_message, selection_reason, status, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
+        (id, template_id, thread_id, page, scenario_id, operator_id, user_message, selection_reason, decision_payload, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
     )
     .run(
       crypto.randomUUID(),
@@ -711,6 +828,7 @@ export function logA2UITemplateSelection(input: {
       input.operatorId ?? null,
       input.userMessage ?? '',
       input.selectionReason ?? '',
+      input.decisionPayload ? JSON.stringify(input.decisionPayload) : null,
       input.status,
     );
 }

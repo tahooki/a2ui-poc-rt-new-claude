@@ -10,12 +10,16 @@ import { openai } from '@ai-sdk/openai';
 import { buildSystemPrompt, PageContext } from '@/server/ai/system-prompt';
 import { aiTools } from '@/server/ai/tools';
 import {
+  clearPendingTemplateDecisionState,
   getCurrentScenarioId,
   getAllDeployments,
   getAllIncidents,
   getAllJobRuns,
   getAllReports,
   getAuditLogs,
+  getPendingTemplateDecisionState,
+  logA2UITemplateSelection,
+  setPendingTemplateDecisionState,
 } from '@/server/db';
 import {
   buildTemplatePromptGuidance,
@@ -26,6 +30,11 @@ import { CORE_AI_TOOL_NAMES } from '@/server/ai/template-config';
 import {
   A2UI_SCENARIO_QUESTION_CASES,
 } from '@/server/scenarios/a2ui-question-catalog';
+import {
+  buildTemplateDecisionCandidates,
+  decideTemplateWithAI,
+  type TemplateDecisionOutcome,
+} from '@/server/ai/template-decision';
 
 export const runtime = 'nodejs';
 export const maxDuration = 60;
@@ -39,9 +48,12 @@ function normalizeQuestionForMatch(text: string) {
   return text.trim().replace(/\s+/g, ' ').toLowerCase();
 }
 
-function hasA2UIIntent(userText: string) {
+function hasA2UIIntent(
+  userText: string,
+  templates: A2UITemplateAvailability[] = [],
+) {
   const normalizedUserText = normalizeQuestionForMatch(userText);
-  return [
+  const explicitUiSignals = [
     '카드',
     'a2ui',
     '템플릿',
@@ -49,32 +61,106 @@ function hasA2UIIntent(userText: string) {
     '스텝퍼',
     '체크리스트',
     '렌더',
-    '보여줘',
-  ].some((keyword) => normalizedUserText.includes(keyword));
+    '렌더링',
+  ];
+  const renderVerbs = ['보여줘', '띄워줘', '표시해줘', 'render'];
+  const hasUiSignal = explicitUiSignals.some((keyword) =>
+    normalizedUserText.includes(keyword),
+  );
+  const hasRenderVerb = renderVerbs.some((keyword) =>
+    normalizedUserText.includes(keyword),
+  );
+  const hasTemplateKeywordSignal = templates.some((template) =>
+    template.keywords.some((keyword) =>
+      normalizedUserText.includes(keyword.toLowerCase()),
+    ),
+  );
+
+  return hasUiSignal || (hasRenderVerb && hasTemplateKeywordSignal);
 }
 
-function inferDeploymentTargetId(context: PageContext) {
-  return context.selectedEntityId?.startsWith('dep_')
-    ? context.selectedEntityId
-    : 'latest';
+function getCollectedString(
+  collectedInputs: Record<string, string | number | boolean | null> | undefined,
+  ...keys: string[]
+) {
+  if (!collectedInputs) {
+    return null;
+  }
+
+  for (const key of keys) {
+    const value = collectedInputs[key];
+    if (typeof value === 'string' && value.trim().length > 0) {
+      return value.trim();
+    }
+  }
+
+  return null;
 }
 
-function inferIncidentTargetId(context: PageContext) {
-  return context.selectedEntityId?.startsWith('inc_')
-    ? context.selectedEntityId
-    : 'active_incident';
+function inferDeploymentTargetId(
+  context: PageContext,
+  collectedInputs?: Record<string, string | number | boolean | null>,
+) {
+  const decisionTargetId = getCollectedString(
+    collectedInputs,
+    'selectedDeploymentId',
+    'selectedEntityId',
+  );
+  if (decisionTargetId?.startsWith('dep_')) {
+    return decisionTargetId;
+  }
+
+  return context.selectedEntityId?.startsWith('dep_') ? context.selectedEntityId : 'latest';
 }
 
-function inferJobRunTargetId(context: PageContext) {
-  return context.selectedEntityId?.startsWith('job_')
-    ? context.selectedEntityId
-    : 'latest_job';
+function inferIncidentTargetId(
+  context: PageContext,
+  collectedInputs?: Record<string, string | number | boolean | null>,
+) {
+  const decisionTargetId = getCollectedString(
+    collectedInputs,
+    'selectedIncidentId',
+    'selectedEntityId',
+  );
+  if (decisionTargetId?.startsWith('inc_')) {
+    return decisionTargetId;
+  }
+
+  return context.selectedEntityId?.startsWith('inc_') ? context.selectedEntityId : 'active_incident';
 }
 
-function inferConfirmActionType(context: PageContext, userText: string) {
+function inferJobRunTargetId(
+  context: PageContext,
+  collectedInputs?: Record<string, string | number | boolean | null>,
+) {
+  const decisionTargetId = getCollectedString(
+    collectedInputs,
+    'selectedJobRunId',
+    'selectedEntityId',
+  );
+  if (decisionTargetId?.startsWith('job_')) {
+    return decisionTargetId;
+  }
+
+  return context.selectedEntityId?.startsWith('job_') ? context.selectedEntityId : 'latest_job';
+}
+
+function inferConfirmActionType(
+  context: PageContext,
+  userText: string,
+  collectedInputs?: Record<string, string | number | boolean | null>,
+) {
   const normalizedUserText = normalizeQuestionForMatch(userText);
+  const selectedEntityId = getCollectedString(
+    collectedInputs,
+    'selectedEntityId',
+    'selectedJobRunId',
+    'selectedIncidentId',
+    'selectedDeploymentId',
+  );
 
   if (
+    selectedEntityId?.startsWith('job_') ||
     context.selectedEntityId?.startsWith('job_') ||
     context.page === 'jobs' ||
     normalizedUserText.includes('job') ||
@@ -84,6 +170,7 @@ function inferConfirmActionType(context: PageContext, userText: string) {
   }
 
   if (
+    selectedEntityId?.startsWith('inc_') ||
     context.selectedEntityId?.startsWith('inc_') ||
     context.page === 'incidents' ||
     normalizedUserText.includes('인시던트') ||
@@ -130,29 +217,30 @@ function buildTemplateToolArgs(
   template: A2UITemplateAvailability,
   context: PageContext,
   userText: string,
+  collectedInputs?: Record<string, string | number | boolean | null>,
 ) {
   switch (template.tool_name) {
     case 'renderRollbackCard':
     case 'renderDryRunStepperCard':
       return {
-        deploymentId: inferDeploymentTargetId(context),
+        deploymentId: inferDeploymentTargetId(context, collectedInputs),
       };
     case 'renderEvidenceCard':
       return {
-        incidentId: inferIncidentTargetId(context),
+        incidentId: inferIncidentTargetId(context, collectedInputs),
       };
     case 'renderJobReviewCard':
       return {
-        jobRunId: inferJobRunTargetId(context),
+        jobRunId: inferJobRunTargetId(context, collectedInputs),
       };
     case 'renderConfirmCard': {
-      const actionType = inferConfirmActionType(context, userText);
+      const actionType = inferConfirmActionType(context, userText, collectedInputs);
       const targetId =
         actionType === 'job_execute'
-          ? inferJobRunTargetId(context)
+          ? inferJobRunTargetId(context, collectedInputs)
           : actionType === 'incident_close'
-            ? inferIncidentTargetId(context)
-            : inferDeploymentTargetId(context);
+            ? inferIncidentTargetId(context, collectedInputs)
+            : inferDeploymentTargetId(context, collectedInputs);
 
       return {
         actionType,
@@ -161,7 +249,7 @@ function buildTemplateToolArgs(
     }
     case 'renderReportTemplateCard':
       return {
-        incidentId: inferIncidentTargetId(context),
+        incidentId: inferIncidentTargetId(context, collectedInputs),
         reportType: inferReportType(context, userText),
       };
     default:
@@ -205,46 +293,69 @@ function findForcedA2UIQuestionCase(
   );
 }
 
-function findForcedA2UITemplate(
-  context: PageContext,
-  userText: string,
-  scenarioId: string,
-) {
-  if (!hasA2UIIntent(userText)) {
-    return null;
-  }
+interface A2UIRenderOutput {
+  type: 'a2ui_render';
+  cardType: string;
+  cardData: Record<string, unknown>;
+}
 
-  const enabledTemplates = listEnabledA2UITemplates(
-    {
-      page: context.page,
-      role: context.operatorRole,
-      scenarioId,
-    },
-    userText,
+function isA2UIRenderOutput(output: unknown): output is A2UIRenderOutput {
+  if (!output || typeof output !== 'object') return false;
+
+  const record = output as Record<string, unknown>;
+  return (
+    record.type === 'a2ui_render' &&
+    typeof record.cardType === 'string' &&
+    typeof record.cardData === 'object' &&
+    record.cardData !== null
   );
+}
 
-  const matchedTemplates = enabledTemplates
-    .filter((template) => template.matchedKeywordCount > 0)
-    .sort((a, b) => {
-      if (b.matchedKeywordCount !== a.matchedKeywordCount) {
-        return b.matchedKeywordCount - a.matchedKeywordCount;
-      }
-      return a.name.localeCompare(b.name, 'ko');
-    });
-
-  const selectedTemplate = matchedTemplates[0];
-  if (!selectedTemplate) {
-    return null;
-  }
-
-  const toolArgs = buildTemplateToolArgs(selectedTemplate, context, userText);
-  if (!toolArgs) {
-    return null;
+function attachDecisionEnvelope(
+  output: unknown,
+  input: {
+    template: A2UITemplateAvailability;
+    decision: TemplateDecisionOutcome;
+    selectedToolName: string;
+  },
+) {
+  if (!isA2UIRenderOutput(output)) {
+    return output;
   }
 
   return {
-    expectedToolName: selectedTemplate.tool_name,
-    toolArgs,
+    ...output,
+    cardData: {
+      ...output.cardData,
+      _a2uiDecisionContext: {
+        templateId: input.template.id,
+        toolName: input.selectedToolName,
+        strategy: input.decision.strategy,
+        confidence: input.decision.confidence,
+        decisionReason: input.decision.decisionReason,
+        matchedSignals: input.decision.matchedSignals,
+        missingInputs: input.decision.missingInputs,
+        collectedInputs: input.decision.selectedCandidate?.collectedInputs ?? {},
+      },
+    },
+    renderer: {
+      name: 'A2UICardRenderer',
+      version: 'v1',
+      schema: 'A2UIRenderEnvelope/v1',
+    },
+    template: {
+      templateId: input.template.id,
+      toolName: input.selectedToolName,
+      cardType: output.cardType,
+    },
+    decision: {
+      strategy: input.decision.strategy,
+      confidence: input.decision.confidence,
+      decisionReason: input.decision.decisionReason,
+      matchedSignals: input.decision.matchedSignals,
+      missingInputs: input.decision.missingInputs,
+      collectedInputs: input.decision.selectedCandidate?.collectedInputs ?? {},
+    },
   };
 }
 
@@ -280,6 +391,34 @@ function createForcedA2UIResponse(
   });
 
   return createUIMessageStreamResponse({ stream });
+}
+
+function createTextResponse(messages: UIMessage[], text: string): Response {
+  const stream = createUIMessageStream({
+    originalMessages: messages,
+    execute: ({ writer }) => {
+      writer.write({ type: 'start' });
+      writer.write({ type: 'text-start', id: 'decision-followup-text' });
+      writer.write({
+        type: 'text-delta',
+        id: 'decision-followup-text',
+        delta: text,
+      });
+      writer.write({ type: 'text-end', id: 'decision-followup-text' });
+      writer.write({ type: 'finish', finishReason: 'stop' });
+    },
+  });
+
+  return createUIMessageStreamResponse({ stream });
+}
+
+function isPendingTemplateDecisionActive(createdAt: string) {
+  const createdTime = new Date(createdAt).getTime();
+  if (Number.isNaN(createdTime)) {
+    return false;
+  }
+
+  return Date.now() - createdTime <= 15 * 60 * 1000;
 }
 
 function selectRuntimeTools(context: PageContext, userText: string) {
@@ -535,23 +674,56 @@ export async function POST(req: Request) {
     }
 
     const userText = extractLastUserText(messages);
+    const apiKey = process.env.OPENAI_API_KEY?.trim();
     const currentScenarioId = getCurrentScenarioId();
+    const enabledTemplates = listEnabledA2UITemplates(
+      {
+        page: context.page,
+        role: context.operatorRole,
+        scenarioId: currentScenarioId,
+      },
+      userText,
+    );
+    const a2uiIntent = hasA2UIIntent(userText, enabledTemplates);
+    const pendingTemplateDecision = getPendingTemplateDecisionState(
+      context.operatorId,
+      context.page,
+    );
+    const hasActivePendingTemplateDecision =
+      pendingTemplateDecision !== null &&
+      pendingTemplateDecision.scenarioId === currentScenarioId &&
+      isPendingTemplateDecisionActive(pendingTemplateDecision.createdAt);
+    if (pendingTemplateDecision && !hasActivePendingTemplateDecision) {
+      clearPendingTemplateDecisionState(context.operatorId, context.page);
+    }
+    const templateByToolName = new Map(
+      enabledTemplates.map((template) => [template.tool_name, template]),
+    );
+
     const forcedQuestionCase = findForcedA2UIQuestionCase(
       context,
       userText,
       currentScenarioId,
     );
-    const forcedTemplateInvocation = forcedQuestionCase
-      ? null
-      : findForcedA2UITemplate(context, userText, currentScenarioId);
-    const forcedInvocation = forcedQuestionCase
-      ? {
-          expectedToolName: forcedQuestionCase.expectedToolName,
-          toolArgs: forcedQuestionCase.toolArgs,
-        }
-      : forcedTemplateInvocation;
 
-    if (forcedInvocation) {
+    if (
+      hasActivePendingTemplateDecision &&
+      ['취소', '그만', 'cancel', 'stop'].some((keyword) =>
+        normalizeQuestionForMatch(userText).includes(keyword),
+      )
+    ) {
+      clearPendingTemplateDecisionState(context.operatorId, context.page);
+      return createTextResponse(messages, '보류 중이던 A2UI 템플릿 선택을 취소했습니다.');
+    }
+
+    if (forcedQuestionCase) {
+      clearPendingTemplateDecisionState(context.operatorId, context.page);
+      const forcedTemplate =
+        templateByToolName.get(forcedQuestionCase.expectedToolName) ?? null;
+      const forcedInvocation = {
+        expectedToolName: forcedQuestionCase.expectedToolName,
+        toolArgs: forcedQuestionCase.toolArgs,
+      };
       const forcedTool = (
         aiTools as Record<
           string,
@@ -560,7 +732,50 @@ export async function POST(req: Request) {
       )[forcedInvocation.expectedToolName];
 
       if (forcedTool?.execute) {
-        const forcedOutput = await forcedTool.execute(forcedInvocation.toolArgs);
+        const forcedCandidate = forcedTemplate
+          ? buildTemplateDecisionCandidates({
+              templates: [forcedTemplate],
+              userText,
+              context,
+              scenarioId: currentScenarioId,
+            })[0] ?? null
+          : null;
+        const forcedOutputRaw = await forcedTool.execute(forcedInvocation.toolArgs);
+        const forcedDecision: TemplateDecisionOutcome = {
+          selectedTemplateId: forcedTemplate?.id ?? null,
+          confidence: 1,
+          decisionReason: '시나리오 Exact Match 규칙으로 템플릿을 강제 선택했습니다.',
+          matchedSignals: ['scenario_exact_match'],
+          rejectedTemplateIds: enabledTemplates
+            .filter((template) => template.tool_name !== forcedInvocation.expectedToolName)
+            .map((template) => template.id),
+          missingInputs: forcedCandidate?.missingInputKeys ?? [],
+          shouldAskFollowUp: false,
+          selectedTemplate: forcedTemplate,
+          selectedCandidate: forcedCandidate,
+          candidates: forcedCandidate ? [forcedCandidate] : [],
+          strategy: 'rule+heuristic_fallback',
+        };
+        const forcedOutput =
+          forcedTemplate !== null
+            ? attachDecisionEnvelope(forcedOutputRaw, {
+                template: forcedTemplate,
+                decision: forcedDecision,
+                selectedToolName: forcedInvocation.expectedToolName,
+              })
+            : forcedOutputRaw;
+
+        logA2UITemplateSelection({
+          templateId: forcedTemplate?.id ?? null,
+          page: context.page,
+          scenarioId: currentScenarioId,
+          operatorId: context.operatorId,
+          userMessage: userText,
+          selectionReason: forcedDecision.decisionReason,
+          decisionPayload: forcedDecision,
+          status: forcedTemplate ? 'selected' : 'fallback',
+        });
+
         return createForcedA2UIResponse(
           messages,
           forcedInvocation,
@@ -569,10 +784,141 @@ export async function POST(req: Request) {
       }
     }
 
+    if ((a2uiIntent || hasActivePendingTemplateDecision) && enabledTemplates.length > 0) {
+      const candidateTemplateIdSet = new Set(
+        pendingTemplateDecision?.candidateTemplateIds ?? [],
+      );
+      const decisionTemplates =
+        hasActivePendingTemplateDecision && candidateTemplateIdSet.size > 0
+          ? enabledTemplates.filter((template) => candidateTemplateIdSet.has(template.id))
+          : enabledTemplates;
+      const decisionUserText =
+        hasActivePendingTemplateDecision && pendingTemplateDecision
+          ? `${pendingTemplateDecision.originalUserText}\n추가 판단근거: ${userText}`
+          : userText;
+      const decision = await decideTemplateWithAI({
+        userText: decisionUserText,
+        context,
+        scenarioId: currentScenarioId,
+        templates: decisionTemplates,
+        apiKey,
+      });
+
+      if (decision.shouldAskFollowUp && decision.followUpQuestion) {
+        setPendingTemplateDecisionState(context.operatorId, context.page, {
+          originalUserText:
+            pendingTemplateDecision?.originalUserText ?? userText,
+          scenarioId: currentScenarioId,
+          candidateTemplateIds:
+            decision.candidates.length > 0
+              ? decision.candidates.map((candidate) => candidate.template.id)
+              : decision.selectedTemplateId
+                ? [decision.selectedTemplateId]
+                : [],
+          createdAt: new Date().toISOString(),
+        });
+        logA2UITemplateSelection({
+          templateId: decision.selectedTemplateId,
+          page: context.page,
+          scenarioId: currentScenarioId,
+          operatorId: context.operatorId,
+          userMessage: userText,
+          selectionReason: decision.decisionReason,
+          decisionPayload: decision,
+          status: 'blocked',
+        });
+        return createTextResponse(messages, decision.followUpQuestion);
+      }
+
+      if (decision.selectedTemplate) {
+        clearPendingTemplateDecisionState(context.operatorId, context.page);
+        const selectedTemplate = decision.selectedTemplate;
+        const toolArgs = buildTemplateToolArgs(
+          selectedTemplate,
+          context,
+          decisionUserText,
+          decision.selectedCandidate?.collectedInputs,
+        );
+        if (!toolArgs) {
+          logA2UITemplateSelection({
+            templateId: selectedTemplate.id,
+            page: context.page,
+            scenarioId: currentScenarioId,
+            operatorId: context.operatorId,
+            userMessage: userText,
+            selectionReason: '선택된 템플릿의 tool args를 생성하지 못했습니다.',
+            decisionPayload: decision,
+            status: 'blocked',
+          });
+        } else {
+          const selectedToolName = selectedTemplate.tool_name;
+          const selectedTool = (
+            aiTools as Record<
+              string,
+              { execute?: (args: Record<string, unknown>) => Promise<unknown> }
+            >
+          )[selectedToolName];
+
+          if (selectedTool?.execute) {
+            const selectedOutputRaw = await selectedTool.execute(toolArgs);
+            const selectedOutput = attachDecisionEnvelope(selectedOutputRaw, {
+              template: selectedTemplate,
+              decision,
+              selectedToolName,
+            });
+
+            logA2UITemplateSelection({
+              templateId: selectedTemplate.id,
+              page: context.page,
+              scenarioId: currentScenarioId,
+              operatorId: context.operatorId,
+              userMessage: userText,
+              selectionReason: decision.decisionReason,
+              decisionPayload: decision,
+              status: 'selected',
+            });
+
+            return createForcedA2UIResponse(
+              messages,
+              {
+                expectedToolName: selectedToolName,
+                toolArgs,
+              },
+              selectedOutput,
+            );
+          }
+        }
+      }
+
+      clearPendingTemplateDecisionState(context.operatorId, context.page);
+      logA2UITemplateSelection({
+        templateId: null,
+        page: context.page,
+        scenarioId: currentScenarioId,
+        operatorId: context.operatorId,
+        userMessage: userText,
+        selectionReason: '재판단 후 유효한 템플릿 실행에 실패해 일반 응답으로 fallback합니다.',
+        decisionPayload: decision,
+        status: 'fallback',
+      });
+    }
+
+    if (a2uiIntent && enabledTemplates.length === 0) {
+      clearPendingTemplateDecisionState(context.operatorId, context.page);
+      logA2UITemplateSelection({
+        templateId: null,
+        page: context.page,
+        scenarioId: currentScenarioId,
+        operatorId: context.operatorId,
+        userMessage: userText,
+        selectionReason: 'A2UI 의도는 감지됐지만 현재 컨텍스트에서 활성화된 템플릿이 없습니다.',
+        status: 'fallback',
+      });
+    }
+
     const { runtimeTools, templateGuidance } = selectRuntimeTools(context, userText);
     const systemPrompt = `${buildSystemPrompt(context)}\n\n## A2UI 템플릿 가이드\n\n${templateGuidance}`;
     const modelMessages = await convertToModelMessages(messages);
-    const apiKey = process.env.OPENAI_API_KEY?.trim();
 
     if (!apiKey || apiKey.includes('your') || apiKey.includes('here')) {
       return createFallbackResponse(context, messages);

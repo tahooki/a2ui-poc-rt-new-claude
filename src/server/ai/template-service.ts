@@ -1,9 +1,11 @@
 import {
   getAllA2UITemplates,
+  getA2UITemplateDecisionInputs,
   getA2UITemplate,
   getA2UITemplateOverrides,
   getA2UITemplateRules,
 } from "@/server/db";
+import type { TemplateDecisionInputSource } from "@/server/ai/template-config";
 
 type ScopeType = "global" | "scenario" | "page" | "role";
 
@@ -24,6 +26,19 @@ export interface TemplateOverrideRecord {
   enabled: number;
   created_at: string;
   updated_at: string;
+}
+
+export interface TemplateDecisionInputRecord {
+  id: string;
+  template_id: string;
+  input_key: string;
+  label: string;
+  description: string;
+  required: number;
+  source: TemplateDecisionInputSource;
+  default_value: string | null;
+  priority: number;
+  created_at: string;
 }
 
 export interface A2UITemplateRecord {
@@ -49,6 +64,7 @@ export interface TemplateResolutionInput {
 export interface A2UITemplateAvailability extends A2UITemplateRecord {
   rules: TemplateRuleRecord[];
   overrides: TemplateOverrideRecord[];
+  decisionInputs: TemplateDecisionInputRecord[];
   allowedPages: string[];
   allowedRoles: string[];
   keywords: string[];
@@ -100,6 +116,24 @@ function normalizeOverrides(rows: Array<Record<string, unknown>>) {
   }));
 }
 
+function normalizeDecisionInputs(rows: Array<Record<string, unknown>>) {
+  return rows.map((row) => ({
+    id: String(row["id"] ?? ""),
+    template_id: String(row["template_id"] ?? ""),
+    input_key: String(row["input_key"] ?? ""),
+    label: String(row["label"] ?? ""),
+    description: String(row["description"] ?? ""),
+    required: Number(row["required"] ?? 0),
+    source: String(row["source"] ?? "derived") as TemplateDecisionInputSource,
+    default_value:
+      row["default_value"] === null || row["default_value"] === undefined
+        ? null
+        : String(row["default_value"]),
+    priority: Number(row["priority"] ?? 100),
+    created_at: String(row["created_at"] ?? ""),
+  }));
+}
+
 function pickOverride(
   overrides: TemplateOverrideRecord[],
   scopeType: ScopeType,
@@ -139,6 +173,7 @@ function buildAvailability(
   template: A2UITemplateRecord,
   rules: TemplateRuleRecord[],
   overrides: TemplateOverrideRecord[],
+  decisionInputs: TemplateDecisionInputRecord[],
   input: TemplateResolutionInput,
   userText = "",
 ): A2UITemplateAvailability {
@@ -174,6 +209,7 @@ function buildAvailability(
     ...template,
     rules,
     overrides,
+    decisionInputs,
     allowedPages,
     allowedRoles,
     keywords,
@@ -195,6 +231,7 @@ export function getA2UITemplateAvailability(
     template,
     normalizeRules(getA2UITemplateRules(templateId)),
     normalizeOverrides(getA2UITemplateOverrides(templateId)),
+    normalizeDecisionInputs(getA2UITemplateDecisionInputs(templateId)),
     input,
     userText,
   );
@@ -220,6 +257,14 @@ export function listA2UITemplateAvailability(
     return acc;
   }, {});
 
+  const decisionInputsByTemplate = normalizeDecisionInputs(
+    getA2UITemplateDecisionInputs(),
+  ).reduce<Record<string, TemplateDecisionInputRecord[]>>((acc, inputRule) => {
+    acc[inputRule.template_id] ??= [];
+    acc[inputRule.template_id].push(inputRule);
+    return acc;
+  }, {});
+
   return getAllA2UITemplates()
     .map((row) => normalizeTemplate(row))
     .filter((row): row is A2UITemplateRecord => row !== null)
@@ -228,6 +273,7 @@ export function listA2UITemplateAvailability(
         template,
         rulesByTemplate[template.id] ?? [],
         overridesByTemplate[template.id] ?? [],
+        decisionInputsByTemplate[template.id] ?? [],
         input,
         userText,
       ),
@@ -268,7 +314,15 @@ export function buildTemplatePromptGuidance(
       template.allowedPages.length > 0
         ? `페이지: ${template.allowedPages.join(", ")}`
         : "페이지 제한 없음";
-    return `${index + 1}. ${template.name} (${template.tool_name}) - ${template.prompt_hint} / ${keywordText} / ${pageText}`;
+    const inputText =
+      template.decisionInputs.length > 0
+        ? `판단근거 입력: ${template.decisionInputs
+            .map((inputDef) =>
+              `${inputDef.label}${inputDef.required === 1 ? "(필수)" : ""}`,
+            )
+            .join(", ")}`
+        : "판단근거 입력: 없음";
+    return `${index + 1}. ${template.name} (${template.tool_name}) - ${template.prompt_hint} / ${keywordText} / ${pageText} / ${inputText}`;
   });
 
   return [

@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useOperator } from "@/lib/operators";
+import { useSelectedEntity } from "@/lib/selected-entity";
 import { ChatMessage } from "./chat-message";
 import { cn } from "@/lib/utils";
 import type { UIMessage } from "ai";
@@ -105,6 +106,7 @@ function extractTextContent(message: UIMessage): string {
 export function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
   const pathname = usePathname();
   const { currentOperator } = useOperator();
+  const { selectedEntityId } = useSelectedEntity();
   const [inputValue, setInputValue] = useState("");
   const [scenarioSuggestions, setScenarioSuggestions] = useState<string[] | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -120,6 +122,7 @@ export function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
         page: getChatPage(pathname),
         operatorId: currentOperator.id,
         operatorRole: currentOperator.role,
+        selectedEntityId: selectedEntityId ?? undefined,
       }
     : null;
   const pageContextRef = useRef(pageContext);
@@ -264,6 +267,7 @@ export function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
             body: JSON.stringify({
               operatorId: currentOperator!.id,
               page,
+              selectedEntityId: selectedEntityId ?? undefined,
             }),
           });
           if (!res.ok) return;

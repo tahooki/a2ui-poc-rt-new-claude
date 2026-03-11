@@ -30,6 +30,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useOperator } from "@/lib/operators";
+import { useSyncSelectedEntity } from "@/lib/selected-entity";
 import type {
   Incident,
   IncidentStatus,
@@ -649,6 +650,7 @@ export default function IncidentsPage() {
   const [severityFilter, setSeverityFilter] = useState("all");
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  useSyncSelectedEntity(selectedId);
 
   const fetchIncidents = useCallback(async () => {
     setLoading(true);

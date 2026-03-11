@@ -7,6 +7,7 @@ import { Header } from "@/components/admin/header";
 import { ErrorBoundary } from "@/components/admin/error-boundary";
 import { OperatorProvider } from "@/lib/operators";
 import { ChatPanel } from "@/components/chat/chat-panel";
+import { SelectedEntityProvider } from "@/lib/selected-entity";
 
 export default function AdminLayout({
   children,
@@ -17,24 +18,26 @@ export default function AdminLayout({
 
   return (
     <OperatorProvider>
-      <SidebarProvider defaultOpen={true}>
-        <AppSidebar />
-        <SidebarInset>
-          <Header
-            onChatToggle={() => setIsChatOpen((prev) => !prev)}
-            isChatOpen={isChatOpen}
+      <SelectedEntityProvider>
+        <SidebarProvider defaultOpen={true}>
+          <AppSidebar />
+          <SidebarInset>
+            <Header
+              onChatToggle={() => setIsChatOpen((prev) => !prev)}
+              isChatOpen={isChatOpen}
+            />
+            <ErrorBoundary>
+              <div className="flex flex-1 flex-col gap-0 overflow-auto">
+                {children}
+              </div>
+            </ErrorBoundary>
+          </SidebarInset>
+          <ChatPanel
+            isOpen={isChatOpen}
+            onClose={() => setIsChatOpen(false)}
           />
-          <ErrorBoundary>
-            <div className="flex flex-1 flex-col gap-0 overflow-auto">
-              {children}
-            </div>
-          </ErrorBoundary>
-        </SidebarInset>
-        <ChatPanel
-          isOpen={isChatOpen}
-          onClose={() => setIsChatOpen(false)}
-        />
-      </SidebarProvider>
+        </SidebarProvider>
+      </SelectedEntityProvider>
     </OperatorProvider>
   );
 }

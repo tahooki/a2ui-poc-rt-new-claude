@@ -9,6 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { useOperator } from "@/lib/operators";
+import { useSyncSelectedEntity } from "@/lib/selected-entity";
 
 type JobStatus = "draft" | "dry_run_ready" | "approved" | "running" | "done" | "failed" | "aborted";
 
@@ -73,6 +74,7 @@ export default function JobsPage() {
   const { currentOperator } = useOperator();
   const [jobs, setJobs] = useState<JobRun[]>([]);
   const [selectedJob, setSelectedJob] = useState<JobDetail | null>(null);
+  useSyncSelectedEntity(selectedJob?.id ?? null);
   const [isLoading, setIsLoading] = useState(true);
   const [isActionLoading, setIsActionLoading] = useState(false);
 

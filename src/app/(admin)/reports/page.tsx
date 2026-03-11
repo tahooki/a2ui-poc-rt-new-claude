@@ -20,6 +20,7 @@ import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
 import { useOperator } from "@/lib/operators";
+import { useSyncSelectedEntity } from "@/lib/selected-entity";
 
 type ReportType = "incident_update" | "handover" | "postmortem";
 type ReportStatus = "draft" | "reviewed" | "finalized" | "exported";
@@ -98,6 +99,7 @@ export default function ReportsPage() {
   const { currentOperator } = useOperator();
   const [reports, setReports] = useState<Report[]>([]);
   const [selectedReport, setSelectedReport] = useState<ReportDetail | null>(null);
+  useSyncSelectedEntity(selectedReport?.incident_id ?? selectedReport?.id ?? null);
   const [isLoading, setIsLoading] = useState(true);
   const [isActionLoading, setIsActionLoading] = useState(false);
   const [editingSections, setEditingSections] = useState<ReportSection[]>([]);

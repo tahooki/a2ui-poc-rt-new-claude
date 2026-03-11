@@ -128,7 +128,24 @@ function getStaticToolInfo(part: AnyPart & { type: string }): {
 
 function isA2UIRenderResult(
   result: unknown,
-): result is { type: "a2ui_render"; cardType: string; cardData: Record<string, unknown> } {
+): result is {
+  type: "a2ui_render";
+  cardType: string;
+  cardData: Record<string, unknown>;
+  template?: {
+    templateId?: string;
+    toolName?: string;
+    cardType?: string;
+  };
+  decision?: {
+    strategy?: string;
+    confidence?: number;
+    decisionReason?: string;
+    matchedSignals?: string[];
+    missingInputs?: string[];
+    collectedInputs?: Record<string, unknown>;
+  };
+} {
   return (
     typeof result === "object" &&
     result !== null &&
@@ -140,6 +157,7 @@ function isA2UIRenderResult(
 
 function ToolPartCard({ part, onA2UIAction }: { part: AnyPart; onA2UIAction?: (actionName: string, context: Record<string, unknown>) => void }) {
   const [isExpanded, setIsExpanded] = useState(false);
+  const [isDecisionExpanded, setIsDecisionExpanded] = useState(false);
 
   let info: { toolName: string; stateLabel: string; result: unknown } | null = null;
 
@@ -155,6 +173,19 @@ function ToolPartCard({ part, onA2UIAction }: { part: AnyPart; onA2UIAction?: (a
 
   // Render A2UI card inline instead of raw JSON when the result is an a2ui_render payload
   if (isA2UIRenderResult(result)) {
+    const hasDecisionMeta =
+      typeof result.decision === "object" && result.decision !== null;
+    const decisionJson = hasDecisionMeta
+      ? JSON.stringify(
+          {
+            template: result.template ?? null,
+            decision: result.decision,
+          },
+          null,
+          2,
+        )
+      : null;
+
     return (
       <div className="mt-1.5 space-y-1.5">
         <div className="flex items-center gap-2 px-0.5">
@@ -163,6 +194,32 @@ function ToolPartCard({ part, onA2UIAction }: { part: AnyPart; onA2UIAction?: (a
           </Badge>
           <span className="text-[11px] text-muted-foreground">{stateLabel}</span>
         </div>
+        {hasDecisionMeta && decisionJson && (
+          <div className="rounded-md border border-border/60 bg-muted/30 overflow-hidden text-xs">
+            <button
+              type="button"
+              className="flex items-center gap-2 w-full px-2.5 py-1.5 hover:bg-muted/50 transition-colors cursor-pointer"
+              onClick={() => setIsDecisionExpanded((v) => !v)}
+            >
+              <Badge variant="outline" className="text-[10px] h-4 font-mono shrink-0">
+                decision
+              </Badge>
+              <span className="text-muted-foreground flex-1 text-left truncate">
+                {(result.decision?.decisionReason as string | undefined) ?? "선택 근거 정보"}
+              </span>
+              {isDecisionExpanded ? (
+                <ChevronUp className="h-3 w-3 shrink-0 text-muted-foreground" />
+              ) : (
+                <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground" />
+              )}
+            </button>
+            {isDecisionExpanded && (
+              <pre className="px-2.5 py-2 text-[10px] font-mono text-muted-foreground overflow-auto max-h-40 border-t border-border/40">
+                {decisionJson}
+              </pre>
+            )}
+          </div>
+        )}
         <A2UICardRenderer
           cardType={result.cardType}
           cardData={result.cardData}
