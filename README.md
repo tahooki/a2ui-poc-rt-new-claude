@@ -6,14 +6,19 @@ Next.js 기반의 데모용 운영 콘솔입니다. 인시던트 대응, 배포 
 
 ```bash
 npm install
+# Optional: copy env only if you want live OpenAI responses
+cp .env.example .env.local
 npm run dev
 ```
 
 브라우저에서 [http://localhost:3000](http://localhost:3000) 을 열면 `/dashboard`로 진입합니다.
 
+첫 API 접근 시 `data/ops-console.db`가 자동 생성되고, 스키마와 데모 시나리오 데이터가 자동 시드됩니다.
+즉 새로 클론한 뒤에는 별도 데이터 로드 없이 바로 화면을 확인할 수 있습니다.
+
 ## Scenario Data
 
-개발 서버가 실행 중인 상태에서 별도 터미널로 시나리오 데이터를 로드합니다.
+아래 명령은 자동 시드 이후 데이터를 다시 초기화하거나 검증할 때만 사용합니다.
 
 ```bash
 npm run scenario:reset
@@ -26,6 +31,8 @@ npm run scenario:verify -- --all
 ```bash
 BASE_URL=http://127.0.0.1:3001 npm run scenario:load -- --all
 ```
+
+`OPENAI_API_KEY`가 없으면 Copilot은 데모용 fallback 응답으로 동작합니다.
 
 ## Verification
 

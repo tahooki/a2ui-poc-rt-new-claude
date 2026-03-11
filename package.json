@@ -11,7 +11,8 @@
     "scenario:verify": "node scripts/scenario-cli.mjs verify",
     "scenario:reset": "node scripts/scenario-cli.mjs reset",
     "scenario:list": "node scripts/scenario-cli.mjs list",
-    "test:smoke": "node scripts/playwright-smoke.mjs"
+    "test:smoke": "node scripts/playwright-smoke.mjs",
+    "test:a2ui": "node scripts/a2ui-smoke.mjs all"
   },
   "dependencies": {
     "@a2ui/react": "file:vendor/google-a2ui/react",

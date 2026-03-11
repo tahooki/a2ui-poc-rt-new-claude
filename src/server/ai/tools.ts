@@ -15,8 +15,156 @@ import {
   getService,
   getAllIncidents,
   getAllDeployments,
+  getAllJobRuns,
   getAllJobTemplates,
+  getCurrentScenarioId,
 } from '@/server/db';
+
+const ACTIVE_INCIDENT_STATUSES = new Set(['open', 'investigating', 'mitigated']);
+const DEPLOYMENT_REFERENCE_ALIASES = new Set([
+  'latest',
+  'latest_deployment',
+  'recent',
+  'recent_deployment',
+  'current',
+  'current_deployment',
+]);
+const INCIDENT_REFERENCE_ALIASES = new Set([
+  'latest',
+  'latest_incident',
+  'recent',
+  'recent_incident',
+  'active_incident',
+  'current',
+  'current_incident',
+]);
+const JOB_REFERENCE_ALIASES = new Set([
+  'latest',
+  'latest_job',
+  'recent',
+  'recent_job',
+  'current',
+  'current_job',
+]);
+
+const SCENARIO_DEFAULT_ENTITIES: Record<
+  string,
+  {
+    deploymentId?: string;
+    incidentId?: string;
+    jobRunId?: string;
+  }
+> = {
+  'checkout-5xx': {
+    deploymentId: 'dep_checkout_prod_42',
+    incidentId: 'inc_checkout_prod_01',
+  },
+  'billing-backfill': {
+    incidentId: 'inc_billing_prod_07',
+    jobRunId: 'job_billing_backfill_01',
+  },
+  'healthy-rollout': {
+    deploymentId: 'dep_search_stg_17',
+  },
+  'incident-handover': {
+    deploymentId: 'dep_auth_prod_38',
+    incidentId: 'inc_auth_prod_05',
+  },
+};
+
+function normalizeReference(value: string) {
+  return value.trim().toLowerCase();
+}
+
+function getScenarioDefaults() {
+  return SCENARIO_DEFAULT_ENTITIES[getCurrentScenarioId()] ?? {};
+}
+
+function resolveDeploymentReference(deploymentId: string) {
+  const normalized = normalizeReference(deploymentId);
+  if (getDeployment(deploymentId)) {
+    return deploymentId;
+  }
+  if (!DEPLOYMENT_REFERENCE_ALIASES.has(normalized)) {
+    return deploymentId;
+  }
+
+  const scenarioDeploymentId = getScenarioDefaults().deploymentId;
+  if (scenarioDeploymentId && getDeployment(scenarioDeploymentId)) {
+    return scenarioDeploymentId;
+  }
+
+  const activeIncidentLinkedDeploymentId = (
+    getAllIncidents() as Array<Record<string, unknown>>
+  )
+    .find(
+      (incident) =>
+        ACTIVE_INCIDENT_STATUSES.has(String(incident['status'] ?? '')) &&
+        typeof incident['linked_deployment_id'] === 'string' &&
+        String(incident['linked_deployment_id']).length > 0 &&
+        Boolean(getDeployment(String(incident['linked_deployment_id']))),
+    )
+    ?.['linked_deployment_id'];
+
+  if (typeof activeIncidentLinkedDeploymentId === 'string') {
+    return activeIncidentLinkedDeploymentId;
+  }
+
+  const recentDeployments = getAllDeployments() as Array<Record<string, unknown>>;
+  const attentionDeployment = recentDeployments.find((deployment) =>
+    ['failed', 'rolled_back', 'running', 'pending'].includes(
+      String(deployment['status'] ?? ''),
+    ),
+  );
+
+  return String(attentionDeployment?.['id'] ?? recentDeployments[0]?.['id'] ?? deploymentId);
+}
+
+function resolveIncidentReference(incidentId: string) {
+  const normalized = normalizeReference(incidentId);
+  if (getIncident(incidentId)) {
+    return incidentId;
+  }
+  if (!INCIDENT_REFERENCE_ALIASES.has(normalized)) {
+    return incidentId;
+  }
+
+  const scenarioIncidentId = getScenarioDefaults().incidentId;
+  if (scenarioIncidentId && getIncident(scenarioIncidentId)) {
+    return scenarioIncidentId;
+  }
+
+  const incidents = getAllIncidents() as Array<Record<string, unknown>>;
+  const activeIncident = incidents.find((incident) =>
+    ACTIVE_INCIDENT_STATUSES.has(String(incident['status'] ?? '')),
+  );
+
+  return String(activeIncident?.['id'] ?? incidents[0]?.['id'] ?? incidentId);
+}
+
+function resolveJobRunReference(jobRunId: string) {
+  const normalized = normalizeReference(jobRunId);
+  if (getJobRun(jobRunId)) {
+    return jobRunId;
+  }
+  if (!JOB_REFERENCE_ALIASES.has(normalized)) {
+    return jobRunId;
+  }
+
+  const scenarioJobRunId = getScenarioDefaults().jobRunId;
+  if (scenarioJobRunId && getJobRun(scenarioJobRunId)) {
+    return scenarioJobRunId;
+  }
+
+  const jobRuns = getAllJobRuns() as Array<Record<string, unknown>>;
+  const activeJobRun = jobRuns.find((jobRun) =>
+    ['draft', 'dry_run_ready', 'approved', 'running'].includes(
+      String(jobRun['status'] ?? ''),
+    ),
+  );
+
+  return String(activeJobRun?.['id'] ?? jobRuns[0]?.['id'] ?? jobRunId);
+}
 
 // ─── getIncidentDetail ───
 
@@ -24,17 +172,19 @@ export const getIncidentDetail = tool({
   description:
     '특정 인시던트의 상세 정보를 조회합니다. 인시던트 기본 정보, 이벤트 이력(타임라인), 수집된 증거(에러율, 로그, 메트릭, 트레이스 등)를 함께 반환합니다.',
   inputSchema: z.object({
-    incidentId: z.string().describe('조회할 인시던트의 ID'),
+    incidentId: z.string().describe('조회할 인시던트의 ID. latest, active_incident 같은 별칭도 허용'),
   }),
   execute: async ({ incidentId }: { incidentId: string }) => {
-    const incident = getIncident(incidentId);
+    const resolvedIncidentId = resolveIncidentReference(incidentId);
+    const incident = getIncident(resolvedIncidentId);
     if (!incident) {
       return { error: `인시던트를 찾을 수 없습니다: ${incidentId}` };
     }
-    const events = getIncidentEvents(incidentId);
-    const evidence = getIncidentEvidence(incidentId);
+    const events = getIncidentEvents(resolvedIncidentId);
+    const evidence = getIncidentEvidence(resolvedIncidentId);
 
     return {
+      resolvedIncidentId,
       incident,
       events,
       evidence: (evidence as Array<Record<string, unknown>>).map((e) => ({
@@ -64,22 +214,23 @@ export const getDeploymentDetail = tool({
   description:
     '특정 배포의 상세 정보를 조회합니다. 배포 기본 정보, 코드 변경 diff, 위험 체크 결과, 롤백 계획을 함께 반환합니다.',
   inputSchema: z.object({
-    deploymentId: z.string().describe('조회할 배포의 ID'),
+    deploymentId: z.string().describe('조회할 배포의 ID. latest, recent_deployment 같은 별칭도 허용'),
   }),
   execute: async ({ deploymentId }: { deploymentId: string }) => {
-    const deployment = getDeployment(deploymentId);
+    const resolvedDeploymentId = resolveDeploymentReference(deploymentId);
+    const deployment = getDeployment(resolvedDeploymentId);
     if (!deployment) {
       return { error: `배포를 찾을 수 없습니다: ${deploymentId}` };
     }
-    const diffs = getDeploymentDiffs(deploymentId) as Array<{
+    const diffs = getDeploymentDiffs(resolvedDeploymentId) as Array<{
       change_type: string;
       additions: number;
       deletions: number;
     }>;
-    const riskChecks = getDeploymentRiskChecks(deploymentId) as Array<{
+    const riskChecks = getDeploymentRiskChecks(resolvedDeploymentId) as Array<{
       status: string;
     }>;
-    const rollbackPlan = getRollbackPlan(deploymentId) as
+    const rollbackPlan = getRollbackPlan(resolvedDeploymentId) as
       | Record<string, unknown>
       | undefined;
     const rollbackSteps = rollbackPlan
@@ -93,6 +244,7 @@ export const getDeploymentDetail = tool({
     };
 
     return {
+      resolvedDeploymentId,
       deployment,
       diffs,
       riskChecks,
@@ -130,14 +282,15 @@ export const getDeploymentRisks = tool({
   description:
     '특정 배포의 위험 체크 결과만 빠르게 조회합니다. 각 체크 항목의 통과/경고/실패 여부와 상세 내용을 반환합니다.',
   inputSchema: z.object({
-    deploymentId: z.string().describe('위험 체크를 조회할 배포의 ID'),
+    deploymentId: z.string().describe('위험 체크를 조회할 배포의 ID. latest, recent_deployment 같은 별칭도 허용'),
   }),
   execute: async ({ deploymentId }: { deploymentId: string }) => {
-    const deployment = getDeployment(deploymentId);
+    const resolvedDeploymentId = resolveDeploymentReference(deploymentId);
+    const deployment = getDeployment(resolvedDeploymentId);
     if (!deployment) {
       return { error: `배포를 찾을 수 없습니다: ${deploymentId}` };
     }
-    const riskChecks = getDeploymentRiskChecks(deploymentId) as Array<{
+    const riskChecks = getDeploymentRiskChecks(resolvedDeploymentId) as Array<{
       status: string;
       check_name: string;
       detail: string;
@@ -159,7 +312,8 @@ export const getDeploymentRisks = tool({
             : 'NONE';
 
     return {
-      deploymentId,
+      deploymentId: resolvedDeploymentId,
+      requestedDeploymentId: deploymentId,
       deploymentVersion: (deployment as Record<string, unknown>)['version'],
       overallRisk,
       riskChecks,
@@ -180,33 +334,34 @@ export const suggestRollback = tool({
   description:
     '배포의 위험도를 종합 분석하여 롤백 권고안을 생성합니다. 실패한 위험 체크, 인시던트 연관성, 현재 배포 상태를 고려하여 롤백 여부와 이유를 분석합니다.',
   inputSchema: z.object({
-    deploymentId: z.string().describe('롤백 권고를 분석할 배포의 ID'),
+    deploymentId: z.string().describe('롤백 권고를 분석할 배포의 ID. latest, recent_deployment 같은 별칭도 허용'),
   }),
   execute: async ({ deploymentId }: { deploymentId: string }) => {
-    const deployment = getDeployment(deploymentId) as
+    const resolvedDeploymentId = resolveDeploymentReference(deploymentId);
+    const deployment = getDeployment(resolvedDeploymentId) as
       | Record<string, unknown>
       | undefined;
     if (!deployment) {
       return { error: `배포를 찾을 수 없습니다: ${deploymentId}` };
     }
 
-    const riskChecks = getDeploymentRiskChecks(deploymentId) as Array<{
+    const riskChecks = getDeploymentRiskChecks(resolvedDeploymentId) as Array<{
       status: string;
       check_name: string;
       detail: string;
     }>;
-    const diffs = getDeploymentDiffs(deploymentId) as Array<{
+    const diffs = getDeploymentDiffs(resolvedDeploymentId) as Array<{
       change_type: string;
       file_path: string;
       additions: number;
       deletions: number;
     }>;
-    const rollbackPlan = getRollbackPlan(deploymentId) as
+    const rollbackPlan = getRollbackPlan(resolvedDeploymentId) as
       | Record<string, unknown>
       | undefined;
 
     const linkedIncidents = (getAllIncidents() as Array<Record<string, unknown>>).filter(
-      (i) => i['linked_deployment_id'] === deploymentId,
+      (i) => i['linked_deployment_id'] === resolvedDeploymentId,
     );
 
     const failedChecks = riskChecks.filter((r) => r.status === 'fail');
@@ -264,7 +419,8 @@ export const suggestRollback = tool({
             : 'LOW';
 
     return {
-      deploymentId,
+      deploymentId: resolvedDeploymentId,
+      requestedDeploymentId: deploymentId,
       recommendation: shouldRollback ? 'ROLLBACK' : 'HOLD',
       urgency,
       reasoning: {
@@ -312,16 +468,18 @@ export const getJobDetail = tool({
   description:
     '특정 잡 실행의 상세 정보를 조회합니다. 잡 실행 기본 정보, 스펙, dry-run 결과, 실행 이벤트 이력을 반환합니다.',
   inputSchema: z.object({
-    jobRunId: z.string().describe('조회할 잡 실행의 ID'),
+    jobRunId: z.string().describe('조회할 잡 실행의 ID. latest_job, current_job 같은 별칭도 허용'),
   }),
   execute: async ({ jobRunId }: { jobRunId: string }) => {
-    const jobRun = getJobRun(jobRunId) as Record<string, unknown> | undefined;
+    const resolvedJobRunId = resolveJobRunReference(jobRunId);
+    const jobRun = getJobRun(resolvedJobRunId) as Record<string, unknown> | undefined;
     if (!jobRun) {
       return { error: `잡 실행을 찾을 수 없습니다: ${jobRunId}` };
     }
-    const events = getJobRunEvents(jobRunId);
+    const events = getJobRunEvents(resolvedJobRunId);
 
     return {
+      resolvedJobRunId,
       jobRun: {
         ...jobRun,
         specParsed: (() => {
@@ -473,23 +631,24 @@ export const analyzeIncident = tool({
   description:
     '인시던트를 종합 분석합니다. 수집된 증거와 이벤트를 기반으로 근본 원인 가설, 심각도 평가, 권고 조치를 구조화된 형태로 반환합니다. AI가 추가 분석을 수행하기 위한 데이터를 수집합니다.',
   inputSchema: z.object({
-    incidentId: z.string().describe('분석할 인시던트의 ID'),
+    incidentId: z.string().describe('분석할 인시던트의 ID. latest_incident, active_incident 같은 별칭도 허용'),
   }),
   execute: async ({ incidentId }: { incidentId: string }) => {
-    const incident = getIncident(incidentId) as
+    const resolvedIncidentId = resolveIncidentReference(incidentId);
+    const incident = getIncident(resolvedIncidentId) as
       | Record<string, unknown>
       | undefined;
     if (!incident) {
       return { error: `인시던트를 찾을 수 없습니다: ${incidentId}` };
     }
 
-    const events = getIncidentEvents(incidentId) as Array<{
+    const events = getIncidentEvents(resolvedIncidentId) as Array<{
       action: string;
       detail: string;
       created_at: string;
       actor_id: string;
     }>;
-    const evidence = getIncidentEvidence(incidentId) as Array<{
+    const evidence = getIncidentEvidence(resolvedIncidentId) as Array<{
       type: string;
       title: string;
       content: string;
@@ -591,6 +750,7 @@ export const analyzeIncident = tool({
     }
 
     return {
+      resolvedIncidentId,
       incident,
       analysis: {
         rootCauseHypotheses: rootCauseSignals,
@@ -636,16 +796,17 @@ export const renderRollbackCard = tool({
   description:
     '배포의 롤백 판단 요약 카드를 렌더링합니다. 배포 정보, 위험 체크 결과, 롤백 계획을 시각화된 A2UI 카드로 반환합니다.',
   inputSchema: z.object({
-    deploymentId: z.string().describe('롤백 카드를 렌더링할 배포의 ID'),
+    deploymentId: z.string().describe('롤백 카드를 렌더링할 배포의 ID. latest, recent_deployment 같은 별칭도 허용'),
   }),
   execute: async ({ deploymentId }: { deploymentId: string }) => {
-    const deployment = getDeployment(deploymentId) as Record<string, unknown> | undefined;
+    const resolvedDeploymentId = resolveDeploymentReference(deploymentId);
+    const deployment = getDeployment(resolvedDeploymentId) as Record<string, unknown> | undefined;
     if (!deployment) {
       return { error: `배포를 찾을 수 없습니다: ${deploymentId}` };
     }
 
-    const riskChecks = getDeploymentRiskChecks(deploymentId) as Array<Record<string, unknown>>;
-    const rollbackPlan = getRollbackPlan(deploymentId) as Record<string, unknown> | undefined;
+    const riskChecks = getDeploymentRiskChecks(resolvedDeploymentId) as Array<Record<string, unknown>>;
+    const rollbackPlan = getRollbackPlan(resolvedDeploymentId) as Record<string, unknown> | undefined;
 
     return {
       type: 'a2ui_render' as const,
@@ -665,15 +826,16 @@ export const renderEvidenceCard = tool({
   description:
     '인시던트의 증거 비교 분석 카드를 렌더링합니다. 인시던트 정보와 수집된 증거를 시각화된 A2UI 카드로 반환합니다.',
   inputSchema: z.object({
-    incidentId: z.string().describe('증거 카드를 렌더링할 인시던트의 ID'),
+    incidentId: z.string().describe('증거 카드를 렌더링할 인시던트의 ID. latest_incident, active_incident 같은 별칭도 허용'),
   }),
   execute: async ({ incidentId }: { incidentId: string }) => {
-    const incident = getIncident(incidentId) as Record<string, unknown> | undefined;
+    const resolvedIncidentId = resolveIncidentReference(incidentId);
+    const incident = getIncident(resolvedIncidentId) as Record<string, unknown> | undefined;
     if (!incident) {
       return { error: `인시던트를 찾을 수 없습니다: ${incidentId}` };
     }
 
-    const evidence = getIncidentEvidence(incidentId) as Array<Record<string, unknown>>;
+    const evidence = getIncidentEvidence(resolvedIncidentId) as Array<Record<string, unknown>>;
 
     return {
       type: 'a2ui_render' as const,
@@ -692,10 +854,11 @@ export const renderJobReviewCard = tool({
   description:
     '잡 실행의 스펙 검토 카드를 렌더링합니다. Job spec, 템플릿 정보, dry-run 결과를 시각화된 A2UI 카드로 반환합니다.',
   inputSchema: z.object({
-    jobRunId: z.string().describe('Job spec 검토 카드를 렌더링할 잡 실행의 ID'),
+    jobRunId: z.string().describe('Job spec 검토 카드를 렌더링할 잡 실행의 ID. latest_job, current_job 같은 별칭도 허용'),
   }),
   execute: async ({ jobRunId }: { jobRunId: string }) => {
-    const jobRun = getJobRun(jobRunId) as Record<string, unknown> | undefined;
+    const resolvedJobRunId = resolveJobRunReference(jobRunId);
+    const jobRun = getJobRun(resolvedJobRunId) as Record<string, unknown> | undefined;
     if (!jobRun) {
       return { error: `잡 실행을 찾을 수 없습니다: ${jobRunId}` };
     }
@@ -744,7 +907,7 @@ export const renderReportTemplateCard = tool({
   description:
     '인시던트 보고서 템플릿 카드를 렌더링합니다. 보고서 유형에 따른 섹션 구성을 시각화된 A2UI 카드로 반환합니다.',
   inputSchema: z.object({
-    incidentId: z.string().describe('보고서 대상 인시던트의 ID'),
+    incidentId: z.string().describe('보고서 대상 인시던트의 ID. latest_incident, active_incident 같은 별칭도 허용'),
     reportType: z
       .enum(['incident_postmortem', 'deployment_review', 'weekly_ops', 'default'])
       .default('incident_postmortem')
@@ -759,7 +922,8 @@ export const renderReportTemplateCard = tool({
     incidentId: string;
     reportType: 'incident_postmortem' | 'deployment_review' | 'weekly_ops' | 'default';
   }) => {
-    const incident = getIncident(incidentId) as Record<string, unknown> | undefined;
+    const resolvedIncidentId = resolveIncidentReference(incidentId);
+    const incident = getIncident(resolvedIncidentId) as Record<string, unknown> | undefined;
     if (!incident) {
       return { error: `인시던트를 찾을 수 없습니다: ${incidentId}` };
     }
@@ -781,15 +945,16 @@ export const renderDryRunStepperCard = tool({
   description:
     '배포 롤백의 dry-run 단계별 진행 상황을 시각화한 A2UI 카드를 렌더링합니다. 각 단계의 완료/진행/대기 상태를 스텝퍼 형태로 표시합니다.',
   inputSchema: z.object({
-    deploymentId: z.string().describe('dry-run 카드를 렌더링할 배포의 ID'),
+    deploymentId: z.string().describe('dry-run 카드를 렌더링할 배포의 ID. latest, recent_deployment 같은 별칭도 허용'),
   }),
   execute: async ({ deploymentId }: { deploymentId: string }) => {
-    const deployment = getDeployment(deploymentId) as Record<string, unknown> | undefined;
+    const resolvedDeploymentId = resolveDeploymentReference(deploymentId);
+    const deployment = getDeployment(resolvedDeploymentId) as Record<string, unknown> | undefined;
     if (!deployment) {
       return { error: `배포를 찾을 수 없습니다: ${deploymentId}` };
     }
 
-    const rollbackPlan = getRollbackPlan(deploymentId) as Record<string, unknown> | undefined;
+    const rollbackPlan = getRollbackPlan(resolvedDeploymentId) as Record<string, unknown> | undefined;
     if (!rollbackPlan) {
       return { error: `롤백 계획을 찾을 수 없습니다: ${deploymentId}` };
     }
@@ -822,11 +987,12 @@ export const renderConfirmCard = tool({
     const context: Record<string, string> = { targetId, actionType };
 
     if (actionType === 'rollback') {
-      const deployment = getDeployment(targetId) as Record<string, unknown> | undefined;
+      const resolvedTargetId = resolveDeploymentReference(targetId);
+      const deployment = getDeployment(resolvedTargetId) as Record<string, unknown> | undefined;
       if (!deployment) {
         return { error: `배포를 찾을 수 없습니다: ${targetId}` };
       }
-      const rollbackPlan = getRollbackPlan(targetId) as Record<string, unknown> | undefined;
+      const rollbackPlan = getRollbackPlan(resolvedTargetId) as Record<string, unknown> | undefined;
       entity = {
         id: deployment['id'],
         version: deployment['version'],
@@ -842,10 +1008,11 @@ export const renderConfirmCard = tool({
         { label: '롤백 후 검증 계획 수립', required: false },
         { label: '관련 팀에 롤백 사전 공지', required: false },
       ];
-      context.deploymentId = targetId;
+      context.deploymentId = resolvedTargetId;
       context.planId = String(rollbackPlan?.['id'] ?? '');
     } else if (actionType === 'job_execute') {
-      const jobRun = getJobRun(targetId) as Record<string, unknown> | undefined;
+      const resolvedTargetId = resolveJobRunReference(targetId);
+      const jobRun = getJobRun(resolvedTargetId) as Record<string, unknown> | undefined;
       if (!jobRun) {
         return { error: `Job 실행을 찾을 수 없습니다: ${targetId}` };
       }
@@ -861,9 +1028,10 @@ export const renderConfirmCard = tool({
         { label: '프로덕션 환경 승인 획득', required: true },
         { label: '실행 중 모니터링 담당자 지정', required: false },
       ];
-      context.jobRunId = targetId;
+      context.jobRunId = resolvedTargetId;
     } else {
-      const incident = getIncident(targetId) as Record<string, unknown> | undefined;
+      const resolvedTargetId = resolveIncidentReference(targetId);
+      const incident = getIncident(resolvedTargetId) as Record<string, unknown> | undefined;
       if (!incident) {
         return { error: `인시던트를 찾을 수 없습니다: ${targetId}` };
       }
@@ -881,7 +1049,7 @@ export const renderConfirmCard = tool({
         { label: '포스트모템 보고서 작성', required: false },
         { label: '관련 팀 사후 공유', required: false },
       ];
-      context.incidentId = targetId;
+      context.incidentId = resolvedTargetId;
     }
 
     return {

@@ -10,6 +10,7 @@ import {
   FileText,
   ClipboardList,
   Terminal,
+  Layers3,
 } from "lucide-react";
 import {
   Sidebar,
@@ -56,6 +57,11 @@ const NAV_ITEMS = [
     label: "Audit Log",
     href: "/audit",
     icon: ClipboardList,
+  },
+  {
+    label: "A2UI Templates",
+    href: "/templates",
+    icon: Layers3,
   },
 ];
 

@@ -1,6 +1,12 @@
 import fs from 'fs';
 import Database from 'better-sqlite3';
 import path from 'path';
+import {
+  DEFAULT_RUNTIME_SCENARIO_ID,
+  SCENARIO_TEMPLATE_DEFAULTS,
+  SEED_A2UI_TEMPLATES,
+} from '@/server/ai/template-config';
+import { loadAllScenarios } from '@/server/scenarios';
 
 const DB_PATH = path.join(process.cwd(), 'data', 'ops-console.db');
 
@@ -15,6 +21,7 @@ export function getDb(): Database.Database {
     _db.pragma('journal_mode = WAL');
     _db.pragma('foreign_keys = ON');
     initSchema(_db);
+    ensureSystemSeed(_db);
   }
   return _db;
 }
@@ -236,6 +243,59 @@ function initSchema(db: Database.Database) {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    -- Runtime / A2UI template management
+    CREATE TABLE IF NOT EXISTS app_runtime_state (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS a2ui_templates (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      card_type TEXT NOT NULL,
+      builder_key TEXT NOT NULL,
+      tool_name TEXT NOT NULL,
+      category TEXT NOT NULL DEFAULT 'general',
+      prompt_hint TEXT NOT NULL DEFAULT '',
+      is_enabled INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS a2ui_template_rules (
+      id TEXT PRIMARY KEY,
+      template_id TEXT NOT NULL REFERENCES a2ui_templates(id),
+      rule_type TEXT NOT NULL CHECK(rule_type IN ('keyword','prompt_hint','page','role')),
+      rule_value TEXT NOT NULL,
+      priority INTEGER NOT NULL DEFAULT 100,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS a2ui_template_overrides (
+      id TEXT PRIMARY KEY,
+      template_id TEXT NOT NULL REFERENCES a2ui_templates(id),
+      scope_type TEXT NOT NULL CHECK(scope_type IN ('global','scenario','page','role')),
+      scope_value TEXT NOT NULL,
+      enabled INTEGER NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS a2ui_template_selection_logs (
+      id TEXT PRIMARY KEY,
+      template_id TEXT REFERENCES a2ui_templates(id),
+      thread_id TEXT,
+      page TEXT NOT NULL,
+      scenario_id TEXT,
+      operator_id TEXT,
+      user_message TEXT NOT NULL DEFAULT '',
+      selection_reason TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL CHECK(status IN ('selected','blocked','fallback')) DEFAULT 'selected',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     -- Indexes
     CREATE INDEX IF NOT EXISTS idx_incidents_status ON incidents(status);
     CREATE INDEX IF NOT EXISTS idx_incidents_service ON incidents(service_id);
@@ -244,7 +304,151 @@ function initSchema(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_audit_logs_target ON audit_logs(target_type, target_id);
     CREATE INDEX IF NOT EXISTS idx_audit_logs_actor ON audit_logs(actor_id);
     CREATE INDEX IF NOT EXISTS idx_job_runs_status ON job_runs(status);
+    CREATE INDEX IF NOT EXISTS idx_a2ui_rules_template ON a2ui_template_rules(template_id);
+    CREATE INDEX IF NOT EXISTS idx_a2ui_overrides_template ON a2ui_template_overrides(template_id);
+    CREATE INDEX IF NOT EXISTS idx_a2ui_selection_logs_template ON a2ui_template_selection_logs(template_id);
   `);
+}
+
+function ensureSystemSeed(db: Database.Database) {
+  db.prepare(
+    `INSERT OR IGNORE INTO app_runtime_state (key, value, updated_at)
+     VALUES ('current_scenario_id', ?, datetime('now'))`,
+  ).run(DEFAULT_RUNTIME_SCENARIO_ID);
+
+  const insertTemplate = db.prepare(
+    `INSERT INTO a2ui_templates
+      (id, name, description, card_type, builder_key, tool_name, category, prompt_hint, is_enabled, created_at, updated_at)
+     VALUES
+      (@id, @name, @description, @card_type, @builder_key, @tool_name, @category, @prompt_hint, @is_enabled, datetime('now'), datetime('now'))
+     ON CONFLICT(id) DO UPDATE SET
+      name = excluded.name,
+      description = excluded.description,
+      card_type = excluded.card_type,
+      builder_key = excluded.builder_key,
+      tool_name = excluded.tool_name,
+      category = excluded.category,
+      prompt_hint = excluded.prompt_hint
+     WHERE
+      a2ui_templates.name != excluded.name OR
+      a2ui_templates.description != excluded.description OR
+      a2ui_templates.card_type != excluded.card_type OR
+      a2ui_templates.builder_key != excluded.builder_key OR
+      a2ui_templates.tool_name != excluded.tool_name OR
+      a2ui_templates.category != excluded.category OR
+      a2ui_templates.prompt_hint != excluded.prompt_hint`,
+  );
+
+  const insertRule = db.prepare(
+    `INSERT INTO a2ui_template_rules
+      (id, template_id, rule_type, rule_value, priority, created_at)
+     VALUES
+      (@id, @template_id, @rule_type, @rule_value, @priority, datetime('now'))
+     ON CONFLICT(id) DO UPDATE SET
+      rule_value = excluded.rule_value,
+      priority = excluded.priority`,
+  );
+
+  const insertOverride = db.prepare(
+    `INSERT INTO a2ui_template_overrides
+      (id, template_id, scope_type, scope_value, enabled, created_at, updated_at)
+     VALUES
+      (@id, @template_id, @scope_type, @scope_value, @enabled, datetime('now'), datetime('now'))
+     ON CONFLICT(id) DO NOTHING`,
+  );
+
+  const transaction = db.transaction(() => {
+    for (const template of SEED_A2UI_TEMPLATES) {
+      insertTemplate.run({
+        id: template.id,
+        name: template.name,
+        description: template.description,
+        card_type: template.cardType,
+        builder_key: template.builderKey,
+        tool_name: template.toolName,
+        category: template.category,
+        prompt_hint: template.promptHint,
+        is_enabled: template.isEnabledByDefault ? 1 : 0,
+      });
+
+      template.keywords.forEach((keyword, index) => {
+        insertRule.run({
+          id: `${template.id}_keyword_${index}`,
+          template_id: template.id,
+          rule_type: 'keyword',
+          rule_value: keyword,
+          priority: 40 + index,
+        });
+      });
+
+      insertRule.run({
+        id: `${template.id}_prompt_hint`,
+        template_id: template.id,
+        rule_type: 'prompt_hint',
+        rule_value: template.promptHint,
+        priority: 5,
+      });
+
+      template.allowedPages.forEach((page, index) => {
+        insertRule.run({
+          id: `${template.id}_page_${index}`,
+          template_id: template.id,
+          rule_type: 'page',
+          rule_value: page,
+          priority: 10 + index,
+        });
+      });
+
+      template.allowedRoles?.forEach((role, index) => {
+        insertRule.run({
+          id: `${template.id}_role_${index}`,
+          template_id: template.id,
+          rule_type: 'role',
+          rule_value: role,
+          priority: 10 + index,
+        });
+      });
+    }
+
+    for (const [scenarioId, defaults] of Object.entries(SCENARIO_TEMPLATE_DEFAULTS)) {
+      defaults.forEach((override) => {
+        insertOverride.run({
+          id: `${override.templateId}_scenario_${scenarioId}`,
+          template_id: override.templateId,
+          scope_type: 'scenario',
+          scope_value: scenarioId,
+          enabled: override.enabled ? 1 : 0,
+        });
+      });
+    }
+  });
+
+  transaction();
+
+  const demoDataStats = db
+    .prepare(
+      `SELECT
+        (SELECT COUNT(*) FROM deployments) as deployments,
+        (SELECT COUNT(*) FROM incidents) as incidents,
+        (SELECT COUNT(*) FROM job_runs) as job_runs,
+        (SELECT COUNT(*) FROM reports) as reports`,
+    )
+    .get() as {
+    deployments: number;
+    incidents: number;
+    job_runs: number;
+    reports: number;
+  };
+
+  const hasDemoData =
+    demoDataStats.deployments > 0 ||
+    demoDataStats.incidents > 0 ||
+    demoDataStats.job_runs > 0 ||
+    demoDataStats.reports > 0;
+
+  if (!hasDemoData) {
+    loadAllScenarios(db);
+  }
 }
 
 // ─── Query helpers ───
@@ -379,6 +583,138 @@ export function countAuditLogs() {
   return (getDb().prepare('SELECT COUNT(*) as count FROM audit_logs').get() as { count: number }).count;
 }
 
+// ─── Runtime state helpers ───
+
+export function getRuntimeState(key: string) {
+  return getDb()
+    .prepare('SELECT value, updated_at FROM app_runtime_state WHERE key = ?')
+    .get(key) as { value: string; updated_at: string } | undefined;
+}
+
+export function setRuntimeState(key: string, value: string) {
+  getDb()
+    .prepare(
+      `INSERT INTO app_runtime_state (key, value, updated_at)
+       VALUES (?, ?, datetime('now'))
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`,
+    )
+    .run(key, value);
+}
+
+export function getCurrentScenarioId() {
+  return getRuntimeState('current_scenario_id')?.value ?? DEFAULT_RUNTIME_SCENARIO_ID;
+}
+
+export function setCurrentScenarioId(scenarioId: string) {
+  setRuntimeState('current_scenario_id', scenarioId);
+}
+
+// ─── A2UI template helpers ───
+
+export function getAllA2UITemplates() {
+  return getDb()
+    .prepare('SELECT * FROM a2ui_templates ORDER BY category, name')
+    .all() as Array<Record<string, unknown>>;
+}
+
+export function getA2UITemplate(id: string) {
+  return getDb()
+    .prepare('SELECT * FROM a2ui_templates WHERE id = ?')
+    .get(id) as Record<string, unknown> | undefined;
+}
+
+export function getA2UITemplateByToolName(toolName: string) {
+  return getDb()
+    .prepare('SELECT * FROM a2ui_templates WHERE tool_name = ?')
+    .get(toolName) as Record<string, unknown> | undefined;
+}
+
+export function getA2UITemplateRules(templateId?: string) {
+  if (templateId) {
+    return getDb()
+      .prepare('SELECT * FROM a2ui_template_rules WHERE template_id = ? ORDER BY priority ASC, id ASC')
+      .all(templateId) as Array<Record<string, unknown>>;
+  }
+
+  return getDb()
+    .prepare('SELECT * FROM a2ui_template_rules ORDER BY template_id ASC, priority ASC, id ASC')
+    .all() as Array<Record<string, unknown>>;
+}
+
+export function getA2UITemplateOverrides(templateId?: string) {
+  if (templateId) {
+    return getDb()
+      .prepare('SELECT * FROM a2ui_template_overrides WHERE template_id = ? ORDER BY scope_type ASC, scope_value ASC')
+      .all(templateId) as Array<Record<string, unknown>>;
+  }
+
+  return getDb()
+    .prepare('SELECT * FROM a2ui_template_overrides ORDER BY template_id ASC, scope_type ASC, scope_value ASC')
+    .all() as Array<Record<string, unknown>>;
+}
+
+export function updateA2UITemplateEnabled(id: string, enabled: boolean) {
+  getDb()
+    .prepare("UPDATE a2ui_templates SET is_enabled = ?, updated_at = datetime('now') WHERE id = ?")
+    .run(enabled ? 1 : 0, id);
+  return getA2UITemplate(id);
+}
+
+export function upsertA2UITemplateOverride(
+  templateId: string,
+  scopeType: 'global' | 'scenario' | 'page' | 'role',
+  scopeValue: string,
+  enabled: boolean,
+) {
+  const id = `${templateId}_${scopeType}_${scopeValue}`;
+  getDb()
+    .prepare(
+      `INSERT INTO a2ui_template_overrides (id, template_id, scope_type, scope_value, enabled, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+       ON CONFLICT(id) DO UPDATE SET enabled = excluded.enabled, updated_at = datetime('now')`,
+    )
+    .run(id, templateId, scopeType, scopeValue, enabled ? 1 : 0);
+}
+
+export function clearA2UITemplateOverride(
+  templateId: string,
+  scopeType: 'global' | 'scenario' | 'page' | 'role',
+  scopeValue: string,
+) {
+  getDb()
+    .prepare('DELETE FROM a2ui_template_overrides WHERE template_id = ? AND scope_type = ? AND scope_value = ?')
+    .run(templateId, scopeType, scopeValue);
+}
+
+export function logA2UITemplateSelection(input: {
+  templateId?: string | null;
+  threadId?: string | null;
+  page: string;
+  scenarioId?: string | null;
+  operatorId?: string | null;
+  userMessage?: string;
+  selectionReason?: string;
+  status: 'selected' | 'blocked' | 'fallback';
+}) {
+  getDb()
+    .prepare(
+      `INSERT INTO a2ui_template_selection_logs
+        (id, template_id, thread_id, page, scenario_id, operator_id, user_message, selection_reason, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
+    )
+    .run(
+      crypto.randomUUID(),
+      input.templateId ?? null,
+      input.threadId ?? null,
+      input.page,
+      input.scenarioId ?? null,
+      input.operatorId ?? null,
+      input.userMessage ?? '',
+      input.selectionReason ?? '',
+      input.status,
+    );
+}
+
 // ─── Chat helpers ───
 
 export function getChatThread(operatorId: string, page: string) {
@@ -421,4 +757,5 @@ export function resetDatabase() {
     db.exec(`DELETE FROM ${name}`);
   }
   db.exec('PRAGMA foreign_keys = ON');
+  ensureSystemSeed(db);
 }

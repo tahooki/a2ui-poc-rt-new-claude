@@ -234,3 +234,46 @@ export interface ChatContextSnapshot {
   snapshot: string; // JSON
   createdAt: string;
 }
+
+// ─── Runtime / A2UI Templates ───
+export type A2UITemplateRuleType = 'keyword' | 'prompt_hint' | 'page' | 'role';
+export type A2UITemplateOverrideScope = 'global' | 'scenario' | 'page' | 'role';
+
+export interface RuntimeState {
+  key: string;
+  value: string;
+  updatedAt: string;
+}
+
+export interface A2UITemplate {
+  id: string;
+  name: string;
+  description: string;
+  cardType: string;
+  builderKey: string;
+  toolName: string;
+  category: string;
+  promptHint: string;
+  isEnabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface A2UITemplateRule {
+  id: string;
+  templateId: string;
+  ruleType: A2UITemplateRuleType;
+  ruleValue: string;
+  priority: number;
+  createdAt: string;
+}
+
+export interface A2UITemplateOverride {
+  id: string;
+  templateId: string;
+  scopeType: A2UITemplateOverrideScope;
+  scopeValue: string;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}

@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3';
+import { SEED_A2UI_TEMPLATES } from '@/server/ai/template-config';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -229,6 +230,26 @@ export function verifyScenario(
   }
 
   const checks: CheckResult[] = [];
+
+  const templateCount = (
+    db.prepare('SELECT COUNT(*) as c FROM a2ui_templates').get() as { c: number }
+  ).c;
+  checks.push({
+    name: 'A2UI 템플릿 seed 존재',
+    passed: templateCount >= SEED_A2UI_TEMPLATES.length,
+    detail: `기대 최소 ${SEED_A2UI_TEMPLATES.length}, 실제 ${templateCount}`,
+  });
+
+  const runtimeState = db
+    .prepare("SELECT value FROM app_runtime_state WHERE key = 'current_scenario_id'")
+    .get() as { value: string } | undefined;
+  checks.push({
+    name: '현재 시나리오 런타임 상태 존재',
+    passed: Boolean(runtimeState?.value),
+    detail: runtimeState?.value
+      ? `current_scenario_id=${runtimeState.value}`
+      : 'current_scenario_id 값이 없습니다.',
+  });
 
   // ── 1. 엔티티 존재 확인 ──────────────────────────────────────────────────
 

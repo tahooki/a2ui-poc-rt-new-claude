@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDb, resetDatabase } from '@/server/db';
+import { getCurrentScenarioId, getDb, resetDatabase, setCurrentScenarioId } from '@/server/db';
 import { seed as seedCheckout5xx } from '@/server/scenarios/checkout-5xx';
 import { seed as seedBillingBackfill } from '@/server/scenarios/billing-backfill';
 import { seed as seedHealthyRollout } from '@/server/scenarios/healthy-rollout';
@@ -30,7 +30,11 @@ export async function POST(req: NextRequest) {
 
     if (action === 'reset') {
       resetDatabase();
-      return NextResponse.json({ success: true, message: 'Database reset successfully.' });
+      return NextResponse.json({
+        success: true,
+        message: 'Database reset successfully.',
+        currentScenarioId: getCurrentScenarioId(),
+      });
     }
 
     if (action === 'verify') {
@@ -65,8 +69,13 @@ export async function POST(req: NextRequest) {
 
     const db = getDb();
     seedFn(db);
+    setCurrentScenarioId(scenarioId);
 
-    return NextResponse.json({ success: true, message: `Scenario '${scenarioId}' loaded successfully.` });
+    return NextResponse.json({
+      success: true,
+      message: `Scenario '${scenarioId}' loaded successfully.`,
+      currentScenarioId: scenarioId,
+    });
   } catch (err) {
     console.error('[POST /api/admin]', err);
     const message = err instanceof Error ? err.message : 'Unknown error';

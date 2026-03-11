@@ -18,6 +18,11 @@ interface ChatPanelProps {
   onClose: () => void;
 }
 
+interface ScenarioQuestionSuggestion {
+  id: string;
+  question: string;
+}
+
 const PAGE_SUGGESTIONS: Record<string, string[]> = {
   "/dashboard": [
     "현재 시스템 상태를 요약해줘",
@@ -101,6 +106,7 @@ export function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
   const pathname = usePathname();
   const { currentOperator } = useOperator();
   const [inputValue, setInputValue] = useState("");
+  const [scenarioSuggestions, setScenarioSuggestions] = useState<string[] | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -131,7 +137,51 @@ export function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
 
   const isLoading = status === "submitted" || status === "streaming";
   const canSend = Boolean(currentOperator) && !isLoading;
-  const suggestions = getPageSuggestions(pathname);
+  const suggestions =
+    scenarioSuggestions && scenarioSuggestions.length > 0
+      ? scenarioSuggestions
+      : getPageSuggestions(pathname);
+
+  useEffect(() => {
+    if (!isOpen) {
+      setScenarioSuggestions(null);
+      return;
+    }
+
+    const page = getChatPage(pathname);
+    const controller = new AbortController();
+
+    async function loadScenarioSuggestions() {
+      try {
+        const res = await fetch(
+          `/api/runtime/scenario/questions?page=${encodeURIComponent(page)}&limit=4`,
+          { signal: controller.signal }
+        );
+        if (!res.ok) {
+          throw new Error(`Request failed: ${res.status}`);
+        }
+
+        const data = (await res.json()) as { questions?: ScenarioQuestionSuggestion[] };
+        if (controller.signal.aborted) return;
+
+        const nextSuggestions = (data.questions ?? [])
+          .map((item) => item.question)
+          .filter((item) => item.trim().length > 0);
+
+        setScenarioSuggestions(nextSuggestions.length > 0 ? nextSuggestions : null);
+      } catch (err) {
+        if (controller.signal.aborted) return;
+        console.error("[ChatPanel] Failed to load scenario suggestions:", err);
+        setScenarioSuggestions(null);
+      }
+    }
+
+    loadScenarioSuggestions();
+
+    return () => {
+      controller.abort();
+    };
+  }, [isOpen, pathname]);
 
   // Load thread state only while the panel is open to avoid stale requests during navigation.
   useEffect(() => {

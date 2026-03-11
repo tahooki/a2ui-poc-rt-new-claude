@@ -14,6 +14,7 @@ const PAGE_TITLES: Record<string, string> = {
   "/jobs": "Jobs",
   "/reports": "Reports",
   "/audit": "Audit Log",
+  "/templates": "A2UI Templates",
 };
 
 function getPageTitle(pathname: string): string {

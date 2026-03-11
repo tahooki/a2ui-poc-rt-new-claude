@@ -10,12 +10,22 @@ import { openai } from '@ai-sdk/openai';
 import { buildSystemPrompt, PageContext } from '@/server/ai/system-prompt';
 import { aiTools } from '@/server/ai/tools';
 import {
+  getCurrentScenarioId,
   getAllDeployments,
   getAllIncidents,
   getAllJobRuns,
   getAllReports,
   getAuditLogs,
 } from '@/server/db';
+import {
+  buildTemplatePromptGuidance,
+  listEnabledA2UITemplates,
+  type A2UITemplateAvailability,
+} from '@/server/ai/template-service';
+import { CORE_AI_TOOL_NAMES } from '@/server/ai/template-config';
+import {
+  A2UI_SCENARIO_QUESTION_CASES,
+} from '@/server/scenarios/a2ui-question-catalog';
 
 export const runtime = 'nodejs';
 export const maxDuration = 60;
@@ -23,6 +33,288 @@ export const maxDuration = 60;
 interface ChatRequestBody {
   messages: UIMessage[];
   context: PageContext;
+}
+
+function normalizeQuestionForMatch(text: string) {
+  return text.trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function hasA2UIIntent(userText: string) {
+  const normalizedUserText = normalizeQuestionForMatch(userText);
+  return [
+    '카드',
+    'a2ui',
+    '템플릿',
+    'stepper',
+    '스텝퍼',
+    '체크리스트',
+    '렌더',
+    '보여줘',
+  ].some((keyword) => normalizedUserText.includes(keyword));
+}
+
+function inferDeploymentTargetId(context: PageContext) {
+  return context.selectedEntityId?.startsWith('dep_')
+    ? context.selectedEntityId
+    : 'latest';
+}
+
+function inferIncidentTargetId(context: PageContext) {
+  return context.selectedEntityId?.startsWith('inc_')
+    ? context.selectedEntityId
+    : 'active_incident';
+}
+
+function inferJobRunTargetId(context: PageContext) {
+  return context.selectedEntityId?.startsWith('job_')
+    ? context.selectedEntityId
+    : 'latest_job';
+}
+
+function inferConfirmActionType(context: PageContext, userText: string) {
+  const normalizedUserText = normalizeQuestionForMatch(userText);
+
+  if (
+    context.selectedEntityId?.startsWith('job_') ||
+    context.page === 'jobs' ||
+    normalizedUserText.includes('job') ||
+    normalizedUserText.includes('잡')
+  ) {
+    return 'job_execute' as const;
+  }
+
+  if (
+    context.selectedEntityId?.startsWith('inc_') ||
+    context.page === 'incidents' ||
+    normalizedUserText.includes('인시던트') ||
+    normalizedUserText.includes('incident')
+  ) {
+    return 'incident_close' as const;
+  }
+
+  return 'rollback' as const;
+}
+
+function inferReportType(context: PageContext, userText: string) {
+  const normalizedUserText = normalizeQuestionForMatch(userText);
+
+  if (
+    normalizedUserText.includes('postmortem') ||
+    normalizedUserText.includes('포스트모템')
+  ) {
+    return 'incident_postmortem' as const;
+  }
+
+  if (
+    normalizedUserText.includes('weekly') ||
+    normalizedUserText.includes('주간')
+  ) {
+    return 'weekly_ops' as const;
+  }
+
+  if (
+    normalizedUserText.includes('배포 리뷰') ||
+    normalizedUserText.includes('deployment review')
+  ) {
+    return 'deployment_review' as const;
+  }
+
+  if (context.page === 'reports' || context.page === 'incidents') {
+    return 'incident_postmortem' as const;
+  }
+
+  return 'default' as const;
+}
+
+function buildTemplateToolArgs(
+  template: A2UITemplateAvailability,
+  context: PageContext,
+  userText: string,
+) {
+  switch (template.tool_name) {
+    case 'renderRollbackCard':
+    case 'renderDryRunStepperCard':
+      return {
+        deploymentId: inferDeploymentTargetId(context),
+      };
+    case 'renderEvidenceCard':
+      return {
+        incidentId: inferIncidentTargetId(context),
+      };
+    case 'renderJobReviewCard':
+      return {
+        jobRunId: inferJobRunTargetId(context),
+      };
+    case 'renderConfirmCard': {
+      const actionType = inferConfirmActionType(context, userText);
+      const targetId =
+        actionType === 'job_execute'
+          ? inferJobRunTargetId(context)
+          : actionType === 'incident_close'
+            ? inferIncidentTargetId(context)
+            : inferDeploymentTargetId(context);
+
+      return {
+        actionType,
+        targetId,
+      };
+    }
+    case 'renderReportTemplateCard':
+      return {
+        incidentId: inferIncidentTargetId(context),
+        reportType: inferReportType(context, userText),
+      };
+    default:
+      return null;
+  }
+}
+
+function findForcedA2UIQuestionCase(
+  context: PageContext,
+  userText: string,
+  scenarioId: string,
+) {
+  const normalizedUserText = normalizeQuestionForMatch(userText);
+  if (!normalizedUserText) {
+    return null;
+  }
+
+  const matches = A2UI_SCENARIO_QUESTION_CASES.filter(
+    (questionCase) =>
+      normalizeQuestionForMatch(questionCase.question) === normalizedUserText,
+  );
+
+  if (matches.length === 0) {
+    return null;
+  }
+
+  return (
+    matches.find(
+      (questionCase) =>
+        questionCase.scenarioId === scenarioId &&
+        questionCase.page === context.page &&
+        questionCase.operatorRole === context.operatorRole,
+    ) ??
+    matches.find(
+      (questionCase) =>
+        questionCase.page === context.page &&
+        questionCase.operatorRole === context.operatorRole,
+    ) ??
+    matches.find((questionCase) => questionCase.page === context.page) ??
+    matches[0]
+  );
+}
+
+function findForcedA2UITemplate(
+  context: PageContext,
+  userText: string,
+  scenarioId: string,
+) {
+  if (!hasA2UIIntent(userText)) {
+    return null;
+  }
+
+  const enabledTemplates = listEnabledA2UITemplates(
+    {
+      page: context.page,
+      role: context.operatorRole,
+      scenarioId,
+    },
+    userText,
+  );
+
+  const matchedTemplates = enabledTemplates
+    .filter((template) => template.matchedKeywordCount > 0)
+    .sort((a, b) => {
+      if (b.matchedKeywordCount !== a.matchedKeywordCount) {
+        return b.matchedKeywordCount - a.matchedKeywordCount;
+      }
+      return a.name.localeCompare(b.name, 'ko');
+    });
+
+  const selectedTemplate = matchedTemplates[0];
+  if (!selectedTemplate) {
+    return null;
+  }
+
+  const toolArgs = buildTemplateToolArgs(selectedTemplate, context, userText);
+  if (!toolArgs) {
+    return null;
+  }
+
+  return {
+    expectedToolName: selectedTemplate.tool_name,
+    toolArgs,
+  };
+}
+
+function createForcedA2UIResponse(
+  messages: UIMessage[],
+  forcedInvocation: {
+    expectedToolName: string;
+    toolArgs: Record<string, unknown>;
+  },
+  output: unknown,
+) {
+  const toolCallId = `forced-${forcedInvocation.expectedToolName}-${Date.now()}`;
+  const stream = createUIMessageStream({
+    originalMessages: messages,
+    execute: ({ writer }) => {
+      writer.write({ type: 'start' });
+      writer.write({ type: 'start-step' });
+      writer.write({
+        type: 'tool-input-available',
+        dynamic: true,
+        toolCallId,
+        toolName: forcedInvocation.expectedToolName,
+        input: forcedInvocation.toolArgs,
+      });
+      writer.write({
+        type: 'tool-output-available',
+        toolCallId,
+        output,
+      });
+      writer.write({ type: 'finish-step' });
+      writer.write({ type: 'finish', finishReason: 'stop' });
+    },
+  });
+
+  return createUIMessageStreamResponse({ stream });
+}
+
+function selectRuntimeTools(context: PageContext, userText: string) {
+  const scenarioId = getCurrentScenarioId();
+  const enabledTemplates = listEnabledA2UITemplates(
+    {
+      page: context.page,
+      role: context.operatorRole,
+      scenarioId,
+    },
+    userText,
+  );
+
+  const activeToolNames = new Set<string>([
+    ...CORE_AI_TOOL_NAMES,
+    ...enabledTemplates.map((template) => template.tool_name),
+  ]);
+
+  const runtimeTools = Object.fromEntries(
+    Object.entries(aiTools).filter(([toolName]) => activeToolNames.has(toolName)),
+  ) as typeof aiTools;
+
+  const templateGuidance = buildTemplatePromptGuidance(
+    {
+      page: context.page,
+      role: context.operatorRole,
+      scenarioId,
+    },
+    userText,
+  );
+
+  return {
+    runtimeTools,
+    templateGuidance,
+  };
 }
 
 function extractLastUserText(messages: UIMessage[]): string {
@@ -242,7 +534,43 @@ export async function POST(req: Request) {
       );
     }
 
-    const systemPrompt = buildSystemPrompt(context);
+    const userText = extractLastUserText(messages);
+    const currentScenarioId = getCurrentScenarioId();
+    const forcedQuestionCase = findForcedA2UIQuestionCase(
+      context,
+      userText,
+      currentScenarioId,
+    );
+    const forcedTemplateInvocation = forcedQuestionCase
+      ? null
+      : findForcedA2UITemplate(context, userText, currentScenarioId);
+    const forcedInvocation = forcedQuestionCase
+      ? {
+          expectedToolName: forcedQuestionCase.expectedToolName,
+          toolArgs: forcedQuestionCase.toolArgs,
+        }
+      : forcedTemplateInvocation;
+
+    if (forcedInvocation) {
+      const forcedTool = (
+        aiTools as Record<
+          string,
+          { execute?: (args: Record<string, unknown>) => Promise<unknown> }
+        >
+      )[forcedInvocation.expectedToolName];
+
+      if (forcedTool?.execute) {
+        const forcedOutput = await forcedTool.execute(forcedInvocation.toolArgs);
+        return createForcedA2UIResponse(
+          messages,
+          forcedInvocation,
+          forcedOutput,
+        );
+      }
+    }
+
+    const { runtimeTools, templateGuidance } = selectRuntimeTools(context, userText);
+    const systemPrompt = `${buildSystemPrompt(context)}\n\n## A2UI 템플릿 가이드\n\n${templateGuidance}`;
     const modelMessages = await convertToModelMessages(messages);
     const apiKey = process.env.OPENAI_API_KEY?.trim();
 
@@ -254,7 +582,7 @@ export async function POST(req: Request) {
       model: openai('gpt-4o-mini'),
       system: systemPrompt,
       messages: modelMessages,
-      tools: aiTools,
+      tools: runtimeTools,
       stopWhen: stepCountIs(10),
       onError: ({ error }) => {
         console.error('[chat/route] streamText error:', error);
