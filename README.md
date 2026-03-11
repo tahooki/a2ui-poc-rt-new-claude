@@ -1,36 +1,51 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# DevOps Ops Console
 
-## Getting Started
+Next.js 기반의 데모용 운영 콘솔입니다. 인시던트 대응, 배포 확인, 롤백 실행, 잡 실행, 보고서 작성, AI Copilot 흐름을 시나리오 데이터로 검증할 수 있습니다.
 
-First, run the development server:
+## Quick Start
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+브라우저에서 [http://localhost:3000](http://localhost:3000) 을 열면 `/dashboard`로 진입합니다.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Scenario Data
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+개발 서버가 실행 중인 상태에서 별도 터미널로 시나리오 데이터를 로드합니다.
 
-## Learn More
+```bash
+npm run scenario:reset
+npm run scenario:load -- --all
+npm run scenario:verify -- --all
+```
 
-To learn more about Next.js, take a look at the following resources:
+`scenario-cli`는 기본적으로 `http://127.0.0.1:3000/api/admin`을 사용합니다. 다른 포트를 쓰면 `BASE_URL`을 지정하세요.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```bash
+BASE_URL=http://127.0.0.1:3001 npm run scenario:load -- --all
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Verification
 
-## Deploy on Vercel
+```bash
+npm run lint
+npm run build
+npm run test:smoke
+```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+`test:smoke`는 Playwright로 핵심 사용자 흐름을 검증합니다.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- Dashboard 로드
+- AI Copilot 패널 열기
+- Incident 상태 전환
+- Job Dry-run/Approve/Execute/Abort
+- Report 편집 및 Export
+- Deployment Rollback
+- Audit Log 확인
+
+## Documents
+
+- 상세 데모 플로우: `DEMO_GUIDE.md`
+- 구현 계획/시나리오 설계: `CLAUDE_PLAN.md`

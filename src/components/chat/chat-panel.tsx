@@ -133,22 +133,29 @@ export function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
   const canSend = Boolean(currentOperator) && !isLoading;
   const suggestions = getPageSuggestions(pathname);
 
-  // Load existing thread + messages on mount (when operator is available)
+  // Load thread state only while the panel is open to avoid stale requests during navigation.
   useEffect(() => {
-    if (!currentOperator) return;
-    const page = getChatPage(pathname);
+    if (!isOpen || !currentOperator) {
+      threadIdRef.current = null;
+      savedMessageIdsRef.current = new Set();
+      setMessages([]);
+      return;
+    }
 
-    let cancelled = false;
+    const page = getChatPage(pathname);
+    const operatorId = currentOperator.id;
+    const controller = new AbortController();
 
     async function loadThread() {
       try {
         const res = await fetch(
-          `/api/chat/threads?operatorId=${encodeURIComponent(currentOperator!.id)}&page=${encodeURIComponent(page)}`
+          `/api/chat/threads?operatorId=${encodeURIComponent(operatorId)}&page=${encodeURIComponent(page)}`,
+          { signal: controller.signal }
         );
-        if (!res.ok || cancelled) return;
+        if (!res.ok) return;
 
         const data = await res.json();
-        if (cancelled) return;
+        if (controller.signal.aborted) return;
 
         if (data.threadId && data.messages?.length > 0) {
           threadIdRef.current = data.threadId;
@@ -166,8 +173,10 @@ export function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
           }
         } else {
           threadIdRef.current = null;
+          setMessages([]);
         }
       } catch (err) {
+        if (controller.signal.aborted) return;
         console.error("[ChatPanel] Failed to load thread:", err);
       }
     }
@@ -178,10 +187,9 @@ export function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
 
     loadThread();
     return () => {
-      cancelled = true;
+      controller.abort();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentOperator?.id, pathname]);
+  }, [currentOperator, isOpen, pathname, setMessages]);
 
   // Persist new messages when status transitions from streaming/submitted to ready
   useEffect(() => {

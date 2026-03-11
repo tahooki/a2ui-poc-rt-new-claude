@@ -12,6 +12,9 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Vendored upstream packages are verified in their own repos.
+    "vendor/**",
+    "output/**",
   ]),
 ]);
 
