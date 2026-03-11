@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { SidebarProvider, SidebarInset } from "@/components/ui/sidebar";
 import { AppSidebar } from "@/components/admin/app-sidebar";
 import { Header } from "@/components/admin/header";
+import { ErrorBoundary } from "@/components/admin/error-boundary";
 import { OperatorProvider } from "@/lib/operators";
 import { ChatPanel } from "@/components/chat/chat-panel";
 
@@ -32,9 +33,11 @@ export default function AdminLayout({
             onChatToggle={() => setIsChatOpen((prev) => !prev)}
             isChatOpen={isChatOpen}
           />
-          <div className="flex flex-1 flex-col gap-0 overflow-auto">
-            {children}
-          </div>
+          <ErrorBoundary>
+            <div className="flex flex-1 flex-col gap-0 overflow-auto">
+              {children}
+            </div>
+          </ErrorBoundary>
         </SidebarInset>
         <ChatPanel
           isOpen={isChatOpen}

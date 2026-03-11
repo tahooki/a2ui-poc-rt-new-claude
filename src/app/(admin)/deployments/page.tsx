@@ -886,8 +886,9 @@ export default function DeploymentsPage() {
                 </Button>
               </div>
             ) : deployments.length === 0 ? (
-              <div className="flex items-center justify-center py-12">
-                <p className="text-sm text-muted-foreground font-mono">No deployments found.</p>
+              <div className="flex flex-col items-center justify-center py-12 gap-2">
+                <Rocket className="h-8 w-8 text-muted-foreground/30" />
+                <p className="text-sm text-muted-foreground font-mono">No deployments found</p>
               </div>
             ) : (
               <ScrollArea className="h-full max-h-[calc(100vh-260px)]">

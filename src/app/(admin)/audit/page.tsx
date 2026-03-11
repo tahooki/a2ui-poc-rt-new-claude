@@ -157,11 +157,15 @@ export default function AuditPage() {
           <CardContent className="p-0">
             {isLoading ? (
               <div className="flex items-center justify-center h-48 text-sm text-muted-foreground font-mono">
+                <RefreshCw className="h-4 w-4 animate-spin mr-2" />
                 Loading audit logs...
               </div>
             ) : filteredLogs.length === 0 ? (
-              <div className="flex items-center justify-center h-48 text-sm text-muted-foreground font-mono">
-                {hasFilter ? "No logs match your filters" : "No audit logs found"}
+              <div className="flex flex-col items-center justify-center h-48 gap-2">
+                <ClipboardList className="h-8 w-8 text-muted-foreground/30" />
+                <p className="text-sm text-muted-foreground font-mono">
+                  {hasFilter ? "No logs match your filters" : "No audit logs found"}
+                </p>
               </div>
             ) : (
               <Table>

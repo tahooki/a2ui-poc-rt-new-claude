@@ -14,8 +14,18 @@ import {
   Clock,
   User,
   Activity,
-  Loader2,
 } from "lucide-react";
+import {
+  AreaChart,
+  Area,
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  Tooltip,
+  ResponsiveContainer,
+  CartesianGrid,
+} from "recharts";
 import {
   Card,
   CardHeader,
@@ -23,6 +33,7 @@ import {
   CardContent,
 } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
+import { Skeleton } from "@/components/ui/skeleton";
 import type { Incident as DomainIncident } from "@/types/domain";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -59,6 +70,21 @@ interface AuditLog {
   reason: string;
   result: "success" | "failure" | "denied";
   created_at: string;
+}
+
+interface IncidentTrendPoint {
+  date: string;
+  count: number;
+}
+
+interface DeploymentStatPoint {
+  status: string;
+  count: number;
+}
+
+interface DashboardStats {
+  incidentTrend: IncidentTrendPoint[];
+  deploymentStats: DeploymentStatPoint[];
 }
 
 // ─── Severity helpers ─────────────────────────────────────────────────────────
@@ -143,13 +169,13 @@ function StatCard({ label, value, icon, iconBg, href }: StatCardProps) {
           <p className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground mb-1">
             {label}
           </p>
-          <p className="text-3xl font-bold font-mono text-foreground leading-none">
-            {value === null ? (
-              <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-            ) : (
-              value
-            )}
-          </p>
+          {value === null ? (
+            <Skeleton className="h-8 w-12 rounded" />
+          ) : (
+            <p className="text-3xl font-bold font-mono text-foreground leading-none">
+              {value}
+            </p>
+          )}
         </CardContent>
       </Card>
     </Link>
@@ -163,6 +189,7 @@ export default function DashboardPage() {
   const [deployments, setDeployments] = useState<Deployment[] | null>(null);
   const [jobs, setJobs] = useState<JobRun[] | null>(null);
   const [auditLogs, setAuditLogs] = useState<AuditLog[] | null>(null);
+  const [dashboardStats, setDashboardStats] = useState<DashboardStats | null>(null);
 
   useEffect(() => {
     fetch("/api/incidents")
@@ -184,6 +211,11 @@ export default function DashboardPage() {
       .then((r) => r.json())
       .then(setAuditLogs)
       .catch(() => setAuditLogs([]));
+
+    fetch("/api/dashboard/stats")
+      .then((r) => r.json())
+      .then(setDashboardStats)
+      .catch(() => setDashboardStats(null));
   }, []);
 
   // ─── Derived stats ─────────────────────────────────────────────────────────
@@ -276,6 +308,163 @@ export default function DashboardPage() {
         />
       </div>
 
+      {/* ── Charts row ── */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        {/* Incident Trend (Area Chart) */}
+        <Card>
+          <CardHeader className="border-b border-border/50 pb-3">
+            <CardTitle className="font-mono text-sm text-muted-foreground uppercase tracking-wider">
+              Incident Trend — Last 7 Days
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="pt-4">
+            {dashboardStats === null ? (
+              <div className="flex items-center justify-center h-48">
+                <Skeleton className="h-[220px] w-full rounded" />
+              </div>
+            ) : (
+              <ResponsiveContainer width="100%" height={220}>
+                <AreaChart
+                  data={dashboardStats.incidentTrend}
+                  margin={{ top: 8, right: 8, left: -16, bottom: 0 }}
+                >
+                  <defs>
+                    <linearGradient id="incidentFill" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#22C55E" stopOpacity={0.3} />
+                      <stop offset="95%" stopColor="#22C55E" stopOpacity={0.02} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid
+                    strokeDasharray="3 3"
+                    stroke="rgba(255,255,255,0.06)"
+                    vertical={false}
+                  />
+                  <XAxis
+                    dataKey="date"
+                    tick={{ fill: "#a1a1aa", fontSize: 11, fontFamily: "monospace" }}
+                    axisLine={{ stroke: "rgba(255,255,255,0.1)" }}
+                    tickLine={false}
+                  />
+                  <YAxis
+                    allowDecimals={false}
+                    tick={{ fill: "#a1a1aa", fontSize: 11, fontFamily: "monospace" }}
+                    axisLine={false}
+                    tickLine={false}
+                  />
+                  <Tooltip
+                    contentStyle={{
+                      backgroundColor: "#18181b",
+                      border: "1px solid rgba(255,255,255,0.1)",
+                      borderRadius: "8px",
+                      fontSize: "12px",
+                      fontFamily: "monospace",
+                      color: "#f4f4f5",
+                    }}
+                    labelStyle={{ color: "#a1a1aa" }}
+                  />
+                  <Area
+                    type="monotone"
+                    dataKey="count"
+                    stroke="#22C55E"
+                    strokeWidth={2}
+                    fill="url(#incidentFill)"
+                    name="Incidents"
+                  />
+                </AreaChart>
+              </ResponsiveContainer>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Deployment Outcomes (Bar Chart) */}
+        <Card>
+          <CardHeader className="border-b border-border/50 pb-3">
+            <CardTitle className="font-mono text-sm text-muted-foreground uppercase tracking-wider">
+              Deployment Outcomes
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="pt-4">
+            {dashboardStats === null ? (
+              <div className="flex items-center justify-center h-48">
+                <Skeleton className="h-[220px] w-full rounded" />
+              </div>
+            ) : (
+              <ResponsiveContainer width="100%" height={220}>
+                <BarChart
+                  data={dashboardStats.deploymentStats}
+                  margin={{ top: 8, right: 8, left: -16, bottom: 0 }}
+                >
+                  <CartesianGrid
+                    strokeDasharray="3 3"
+                    stroke="rgba(255,255,255,0.06)"
+                    vertical={false}
+                  />
+                  <XAxis
+                    dataKey="status"
+                    tick={{ fill: "#a1a1aa", fontSize: 11, fontFamily: "monospace" }}
+                    axisLine={{ stroke: "rgba(255,255,255,0.1)" }}
+                    tickLine={false}
+                    tickFormatter={(v: string) =>
+                      v === "rolled_back" ? "rolled back" : v
+                    }
+                  />
+                  <YAxis
+                    allowDecimals={false}
+                    tick={{ fill: "#a1a1aa", fontSize: 11, fontFamily: "monospace" }}
+                    axisLine={false}
+                    tickLine={false}
+                  />
+                  <Tooltip
+                    contentStyle={{
+                      backgroundColor: "#18181b",
+                      border: "1px solid rgba(255,255,255,0.1)",
+                      borderRadius: "8px",
+                      fontSize: "12px",
+                      fontFamily: "monospace",
+                      color: "#f4f4f5",
+                    }}
+                    labelStyle={{ color: "#a1a1aa" }}
+                    labelFormatter={(v) => {
+                      const s = String(v);
+                      return s === "rolled_back" ? "rolled back" : s;
+                    }}
+                  />
+                  <Bar
+                    dataKey="count"
+                    name="Deployments"
+                    radius={[4, 4, 0, 0]}
+                    fill="#22C55E"
+                    shape={(props) => {
+                      const colorMap: Record<string, string> = {
+                        succeeded: "#22C55E",
+                        failed: "#EF4444",
+                        rolled_back: "#F59E0B",
+                      };
+                      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                      const p = props as any;
+                      const fill =
+                        colorMap[p?.payload?.status ?? ""] ?? "#22C55E";
+                      return (
+                        <rect
+                          x={p.x}
+                          y={p.y}
+                          width={p.width}
+                          height={p.height}
+                          rx={4}
+                          ry={4}
+                          fill={fill}
+                          fillOpacity={0.85}
+                        />
+                      );
+                    }}
+                  />
+                </BarChart>
+              </ResponsiveContainer>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+
       {/* ── Middle section: hero incident + deployment risk ── */}
       <div className="grid grid-cols-1 xl:grid-cols-5 gap-4">
         {/* ── Hero incident ── */}
@@ -297,8 +486,18 @@ export default function DashboardPage() {
             </CardHeader>
             <CardContent className="pt-4">
               {incidents === null ? (
-                <div className="flex items-center justify-center h-32">
-                  <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+                <div className="flex flex-col gap-3 py-2">
+                  <div className="flex items-center gap-2">
+                    <Skeleton className="h-6 w-16 rounded-full" />
+                    <Skeleton className="h-5 w-20 rounded-full" />
+                  </div>
+                  <Skeleton className="h-5 w-3/4 rounded" />
+                  <Separator />
+                  <div className="flex flex-col gap-2">
+                    <Skeleton className="h-4 w-40 rounded" />
+                    <Skeleton className="h-4 w-32 rounded" />
+                    <Skeleton className="h-4 w-28 rounded" />
+                  </div>
                 </div>
               ) : heroIncident === null ? (
                 <div className="flex flex-col items-center justify-center h-32 gap-2">
@@ -424,8 +623,20 @@ export default function DashboardPage() {
             </CardHeader>
             <CardContent className="pt-3 px-0">
               {deployments === null ? (
-                <div className="flex items-center justify-center h-40">
-                  <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+                <div className="divide-y divide-border/50">
+                  {Array.from({ length: 5 }).map((_, i) => (
+                    <div key={i} className="flex items-center gap-3 px-4 py-2.5">
+                      <Skeleton className="h-2 w-2 rounded-full shrink-0" />
+                      <div className="flex-1 min-w-0 space-y-1.5">
+                        <div className="flex items-center gap-2">
+                          <Skeleton className="h-3.5 w-24 rounded" />
+                          <Skeleton className="h-4 w-12 rounded" />
+                        </div>
+                        <Skeleton className="h-3 w-32 rounded" />
+                      </div>
+                      <Skeleton className="h-5 w-16 rounded-full shrink-0" />
+                    </div>
+                  ))}
                 </div>
               ) : recentDeployments?.length === 0 ? (
                 <div className="flex items-center justify-center h-40">
@@ -527,8 +738,17 @@ export default function DashboardPage() {
         </CardHeader>
         <CardContent className="pt-0 px-0">
           {auditLogs === null ? (
-            <div className="flex items-center justify-center h-24">
-              <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+            <div className="divide-y divide-border/50">
+              {Array.from({ length: 4 }).map((_, i) => (
+                <div key={i} className="flex items-center gap-3 px-4 py-2.5">
+                  <Skeleton className="h-3.5 w-24 rounded shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <Skeleton className="h-3.5 w-48 rounded" />
+                  </div>
+                  <Skeleton className="h-5 w-14 rounded-full shrink-0" />
+                  <Skeleton className="h-3 w-16 rounded shrink-0" />
+                </div>
+              ))}
             </div>
           ) : auditLogs.length === 0 ? (
             <div className="flex items-center justify-center h-24">

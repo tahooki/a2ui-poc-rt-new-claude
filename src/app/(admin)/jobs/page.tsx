@@ -256,11 +256,13 @@ export default function JobsPage() {
             <CardContent className="p-0">
               {isLoading ? (
                 <div className="flex items-center justify-center h-32 text-sm text-muted-foreground font-mono">
+                  <RefreshCw className="h-4 w-4 animate-spin mr-2" />
                   Loading...
                 </div>
               ) : jobs.length === 0 ? (
-                <div className="flex items-center justify-center h-32 text-sm text-muted-foreground font-mono">
-                  No jobs found
+                <div className="flex flex-col items-center justify-center h-32 gap-2">
+                  <Briefcase className="h-8 w-8 text-muted-foreground/30" />
+                  <p className="text-sm text-muted-foreground font-mono">No jobs found</p>
                 </div>
               ) : (
                 <div className="divide-y divide-border/50">
