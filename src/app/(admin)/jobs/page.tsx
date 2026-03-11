@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Briefcase, Play, CheckCircle, XCircle, Clock, ChevronRight, RefreshCw } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 import { Badge } from "@/components/ui/badge";
@@ -101,6 +101,47 @@ export default function JobsPage() {
       // silent
     }
   }, []);
+
+  // Poll progress for running jobs
+  const pollingRef = useRef<NodeJS.Timeout | null>(null);
+
+  useEffect(() => {
+    // Clear any existing interval
+    if (pollingRef.current) {
+      clearInterval(pollingRef.current);
+      pollingRef.current = null;
+    }
+
+    if (selectedJob && selectedJob.status === "running") {
+      pollingRef.current = setInterval(async () => {
+        try {
+          const res = await fetch(`/api/jobs/${selectedJob.id}/progress`, {
+            method: "POST",
+          });
+          if (res.ok) {
+            const data = await res.json();
+            setSelectedJob(data);
+            // Also refresh the job list to update the sidebar progress bar
+            fetchJobs();
+            // Stop polling if the job is done
+            if (data.status !== "running" && pollingRef.current) {
+              clearInterval(pollingRef.current);
+              pollingRef.current = null;
+            }
+          }
+        } catch {
+          // silent
+        }
+      }, 2000);
+    }
+
+    return () => {
+      if (pollingRef.current) {
+        clearInterval(pollingRef.current);
+        pollingRef.current = null;
+      }
+    };
+  }, [selectedJob?.id, selectedJob?.status, fetchJobs]);
 
   useEffect(() => {
     fetchJobs();
@@ -280,14 +321,23 @@ export default function JobsPage() {
             </CardHeader>
             <ScrollArea className="flex-1">
               <CardContent className="flex flex-col gap-6 py-4">
-                {/* Progress for running */}
-                {selectedJob.status === "running" && (
+                {/* Progress for running / done */}
+                {(selectedJob.status === "running" || selectedJob.status === "done") && (
                   <div className="flex flex-col gap-1.5">
                     <div className="flex items-center justify-between text-xs font-mono text-muted-foreground">
                       <span>Progress</span>
-                      <span className="text-amber-400">{selectedJob.progress}%</span>
+                      <span className={selectedJob.status === "done" ? "text-green-400" : "text-amber-400"}>
+                        {selectedJob.progress}%
+                      </span>
                     </div>
-                    <ProgressBar value={selectedJob.progress} />
+                    <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
+                      <div
+                        className={`h-full rounded-full transition-all duration-500 ${
+                          selectedJob.status === "done" ? "bg-green-400" : "bg-amber-400"
+                        }`}
+                        style={{ width: `${Math.min(100, Math.max(0, selectedJob.progress))}%` }}
+                      />
+                    </div>
                   </div>
                 )}
 

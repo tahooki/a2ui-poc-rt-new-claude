@@ -12,8 +12,11 @@ const TRANSITIONS: Record<IncidentStatus, IncidentStatus[]> = {
   closed: [],
 };
 
-// Roles permitted to change incident status
-const ALLOWED_ROLES = ['oncall_engineer', 'ops_engineer', 'support_lead'] as const;
+// Roles permitted to change incident status (general transitions)
+const ALLOWED_ROLES = ['oncall_engineer', 'ops_engineer', 'support_lead', 'release_manager'] as const;
+
+// Roles permitted to close incidents (stricter)
+const CLOSE_ROLES = ['support_lead', 'release_manager'] as const;
 
 export async function PATCH(
   req: NextRequest,
@@ -44,8 +47,9 @@ export async function PATCH(
     if (!actor) {
       return NextResponse.json({ error: 'Actor not found' }, { status: 404 });
     }
+
+    // Check general role permission
     if (!(ALLOWED_ROLES as readonly string[]).includes(actor.role)) {
-      // Log denied attempt
       getDb().prepare(
         `INSERT INTO audit_logs (id, request_id, actor_id, actor_role, action_type, target_type, target_id, reason, result)
          VALUES (?, ?, ?, ?, 'incident_update', 'incident', ?, ?, 'denied')`
@@ -53,6 +57,19 @@ export async function PATCH(
 
       return NextResponse.json(
         { error: `Role '${actor.role}' is not permitted to update incident status` },
+        { status: 403 }
+      );
+    }
+
+    // Closing requires support_lead or release_manager only
+    if (newStatus === 'closed' && !(CLOSE_ROLES as readonly string[]).includes(actor.role)) {
+      getDb().prepare(
+        `INSERT INTO audit_logs (id, request_id, actor_id, actor_role, action_type, target_type, target_id, reason, result)
+         VALUES (?, ?, ?, ?, 'incident_close', 'incident', ?, ?, 'denied')`
+      ).run(crypto.randomUUID(), requestId, actorId, actor.role, id, reason);
+
+      return NextResponse.json(
+        { error: `Only support_lead or release_manager can close incidents. Current role: '${actor.role}'` },
         { status: 403 }
       );
     }

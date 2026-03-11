@@ -775,6 +775,128 @@ export const renderReportTemplateCard = tool({
   },
 });
 
+// ─── renderDryRunStepperCard ───
+
+export const renderDryRunStepperCard = tool({
+  description:
+    '배포 롤백의 dry-run 단계별 진행 상황을 시각화한 A2UI 카드를 렌더링합니다. 각 단계의 완료/진행/대기 상태를 스텝퍼 형태로 표시합니다.',
+  inputSchema: z.object({
+    deploymentId: z.string().describe('dry-run 카드를 렌더링할 배포의 ID'),
+  }),
+  execute: async ({ deploymentId }: { deploymentId: string }) => {
+    const deployment = getDeployment(deploymentId) as Record<string, unknown> | undefined;
+    if (!deployment) {
+      return { error: `배포를 찾을 수 없습니다: ${deploymentId}` };
+    }
+
+    const rollbackPlan = getRollbackPlan(deploymentId) as Record<string, unknown> | undefined;
+    if (!rollbackPlan) {
+      return { error: `롤백 계획을 찾을 수 없습니다: ${deploymentId}` };
+    }
+
+    const steps = getRollbackSteps(rollbackPlan['id'] as string) as Array<Record<string, unknown>>;
+
+    return {
+      type: 'a2ui_render' as const,
+      cardType: 'dry_run_stepper',
+      cardData: {
+        rollbackPlan,
+        steps,
+      },
+    };
+  },
+});
+
+// ─── renderConfirmCard ───
+
+export const renderConfirmCard = tool({
+  description:
+    '위험한 작업(롤백 실행, Job 실행, 인시던트 종료) 전에 최종 확인을 위한 A2UI 카드를 렌더링합니다. 체크리스트와 확인 버튼을 포함합니다.',
+  inputSchema: z.object({
+    actionType: z.enum(['rollback', 'job_execute', 'incident_close']).describe('확인할 작업 유형'),
+    targetId: z.string().describe('작업 대상 ID (배포 ID, Job ID, 또는 인시던트 ID)'),
+  }),
+  execute: async ({ actionType, targetId }: { actionType: 'rollback' | 'job_execute' | 'incident_close'; targetId: string }) => {
+    let entity: Record<string, unknown> = {};
+    let checks: Array<{ label: string; required: boolean }> = [];
+    const context: Record<string, string> = { targetId, actionType };
+
+    if (actionType === 'rollback') {
+      const deployment = getDeployment(targetId) as Record<string, unknown> | undefined;
+      if (!deployment) {
+        return { error: `배포를 찾을 수 없습니다: ${targetId}` };
+      }
+      const rollbackPlan = getRollbackPlan(targetId) as Record<string, unknown> | undefined;
+      entity = {
+        id: deployment['id'],
+        version: deployment['version'],
+        service_id: deployment['service_id'],
+        environment: deployment['environment'],
+        previous_version: deployment['previous_version'],
+        plan_status: rollbackPlan?.['status'] ?? '없음',
+      };
+      checks = [
+        { label: 'Dry-run이 성공적으로 완료됨', required: true },
+        { label: 'Release Manager 승인 획득', required: true },
+        { label: '서비스 모니터링 대시보드 확인', required: true },
+        { label: '롤백 후 검증 계획 수립', required: false },
+        { label: '관련 팀에 롤백 사전 공지', required: false },
+      ];
+      context.deploymentId = targetId;
+      context.planId = String(rollbackPlan?.['id'] ?? '');
+    } else if (actionType === 'job_execute') {
+      const jobRun = getJobRun(targetId) as Record<string, unknown> | undefined;
+      if (!jobRun) {
+        return { error: `Job 실행을 찾을 수 없습니다: ${targetId}` };
+      }
+      entity = {
+        id: jobRun['id'],
+        template_id: jobRun['template_id'],
+        status: jobRun['status'],
+        environment: jobRun['environment'] ?? 'production',
+      };
+      checks = [
+        { label: 'Dry-run 결과 확인 완료', required: true },
+        { label: 'Job spec 파라미터 검증', required: true },
+        { label: '프로덕션 환경 승인 획득', required: true },
+        { label: '실행 중 모니터링 담당자 지정', required: false },
+      ];
+      context.jobRunId = targetId;
+    } else {
+      const incident = getIncident(targetId) as Record<string, unknown> | undefined;
+      if (!incident) {
+        return { error: `인시던트를 찾을 수 없습니다: ${targetId}` };
+      }
+      entity = {
+        id: incident['id'],
+        title: incident['title'],
+        severity: incident['severity'],
+        service_id: incident['service_id'],
+        status: incident['status'],
+      };
+      checks = [
+        { label: '근본 원인이 식별되고 문서화됨', required: true },
+        { label: '영향받은 서비스 정상 복구 확인', required: true },
+        { label: '재발 방지 조치 계획 수립', required: true },
+        { label: '포스트모템 보고서 작성', required: false },
+        { label: '관련 팀 사후 공유', required: false },
+      ];
+      context.incidentId = targetId;
+    }
+
+    return {
+      type: 'a2ui_render' as const,
+      cardType: 'confirm_action',
+      cardData: {
+        actionType,
+        entity,
+        checks,
+        context,
+      },
+    };
+  },
+});
+
 // ─── Exported tools object ───
 
 export const aiTools = {
@@ -788,6 +910,8 @@ export const aiTools = {
   analyzeIncident,
   renderRollbackCard,
   renderEvidenceCard,
+  renderDryRunStepperCard,
+  renderConfirmCard,
   renderJobReviewCard,
   renderReportTemplateCard,
 };

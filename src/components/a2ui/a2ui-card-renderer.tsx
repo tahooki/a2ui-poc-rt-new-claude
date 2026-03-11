@@ -6,6 +6,7 @@ import {
   buildRollbackSummaryCard,
   buildEvidenceComparisonCard,
   buildDryRunStepperCard,
+  buildConfirmActionCard,
   buildJobSpecReviewCard,
   buildReportTemplateCard,
   type A2UICardDef,
@@ -95,6 +96,13 @@ function buildCardDef(
       const steps = (cardData["steps"] as Array<Record<string, unknown>>) ?? [];
       return buildDryRunStepperCard(rollbackPlan, steps);
     }
+    case "confirm_action": {
+      const actionType = (cardData["actionType"] as "rollback" | "job_execute" | "incident_close") ?? "rollback";
+      const entity = (cardData["entity"] as Record<string, unknown>) ?? {};
+      const checks = (cardData["checks"] as Array<{ label: string; required: boolean }>) ?? [];
+      const context = (cardData["context"] as Record<string, string>) ?? {};
+      return buildConfirmActionCard(actionType, entity, checks, context);
+    }
     case "job_spec_review": {
       const jobRun = (cardData["jobRun"] as Record<string, unknown>) ?? {};
       const template = (cardData["template"] as Record<string, unknown>) ?? null;
@@ -110,6 +118,17 @@ function buildCardDef(
       return null;
   }
 }
+
+// ─── Card type labels ────────────────────────────────────────────────────────
+
+const CARD_TYPE_LABELS: Record<string, string> = {
+  rollback_summary: "롤백 판단 요약",
+  evidence_comparison: "증거 비교 분석",
+  dry_run_stepper: "Dry-Run 단계 확인",
+  confirm_action: "실행 확인",
+  job_spec_review: "Job Spec 검토",
+  report_template: "보고서 템플릿",
+};
 
 // ─── Main component ──────────────────────────────────────────────────────────
 
@@ -134,9 +153,18 @@ export function A2UICardRenderer({
     );
   }
 
+  const label = CARD_TYPE_LABELS[cardType];
+
   return (
     <A2UIErrorBoundary cardType={cardType}>
       <div className="rounded-lg border border-border/50 bg-card overflow-hidden">
+        {label && (
+          <div className="px-3 py-1.5 border-b border-border/30 bg-muted/30">
+            <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
+              A2UI · {label}
+            </span>
+          </div>
+        )}
         <A2UIViewer
           root={cardDef.root}
           components={cardDef.components}

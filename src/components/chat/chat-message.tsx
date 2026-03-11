@@ -25,6 +25,7 @@ const A2UICardRenderer = dynamic(
 
 interface ChatMessageProps {
   message: UIMessage;
+  onA2UIAction?: (actionName: string, context: Record<string, unknown>) => void;
 }
 
 function formatTime(date: Date): string {
@@ -137,7 +138,7 @@ function isA2UIRenderResult(
   );
 }
 
-function ToolPartCard({ part }: { part: AnyPart }) {
+function ToolPartCard({ part, onA2UIAction }: { part: AnyPart; onA2UIAction?: (actionName: string, context: Record<string, unknown>) => void }) {
   const [isExpanded, setIsExpanded] = useState(false);
 
   let info: { toolName: string; stateLabel: string; result: unknown } | null = null;
@@ -165,6 +166,7 @@ function ToolPartCard({ part }: { part: AnyPart }) {
         <A2UICardRenderer
           cardType={result.cardType}
           cardData={result.cardData}
+          onAction={onA2UIAction}
         />
       </div>
     );
@@ -200,7 +202,7 @@ function ToolPartCard({ part }: { part: AnyPart }) {
   );
 }
 
-export function ChatMessage({ message }: ChatMessageProps) {
+export function ChatMessage({ message, onA2UIAction }: ChatMessageProps) {
   const isUser = message.role === "user";
   const isAssistant = message.role === "assistant";
   const timestamp = formatTime(new Date());
@@ -262,7 +264,7 @@ export function ChatMessage({ message }: ChatMessageProps) {
 
             // Tool parts (static or dynamic)
             if (p.type === "dynamic-tool" || p.type.startsWith("tool-")) {
-              return <ToolPartCard key={idx} part={p} />;
+              return <ToolPartCard key={idx} part={p} onA2UIAction={onA2UIAction} />;
             }
 
             return null;

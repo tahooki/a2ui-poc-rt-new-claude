@@ -293,18 +293,32 @@ export function verifyScenario(
   }
 
   if (counts.activeIncidents !== undefined) {
-    const actual = (
-      db
-        .prepare(
-          "SELECT COUNT(*) as c FROM incidents WHERE status IN ('open','investigating')",
-        )
-        .get() as { c: number }
-    ).c;
+    // Scope to services belonging to this scenario
+    const scenarioServices = spec.expectedEntities.services ?? [];
+    let actual: number;
+    if (scenarioServices.length > 0) {
+      const placeholders = scenarioServices.map(() => '?').join(',');
+      actual = (
+        db
+          .prepare(
+            `SELECT COUNT(*) as c FROM incidents WHERE status IN ('open','investigating') AND service_id IN (${placeholders})`,
+          )
+          .get(...scenarioServices) as { c: number }
+      ).c;
+    } else {
+      actual = (
+        db
+          .prepare(
+            "SELECT COUNT(*) as c FROM incidents WHERE status IN ('open','investigating')",
+          )
+          .get() as { c: number }
+      ).c;
+    }
     const passed = actual === counts.activeIncidents;
     checks.push({
       name: '활성 인시던트 건수 (open/investigating)',
       passed,
-      detail: `기대: ${counts.activeIncidents}, 실제: ${actual}`,
+      detail: `기대: ${counts.activeIncidents}, 실제: ${actual}${scenarioServices.length > 0 ? ` (서비스: ${scenarioServices.join(', ')})` : ''}`,
     });
   }
 

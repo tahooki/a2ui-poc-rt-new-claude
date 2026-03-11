@@ -4,6 +4,7 @@ import { seed as seedCheckout5xx } from '@/server/scenarios/checkout-5xx';
 import { seed as seedBillingBackfill } from '@/server/scenarios/billing-backfill';
 import { seed as seedHealthyRollout } from '@/server/scenarios/healthy-rollout';
 import { seed as seedIncidentHandover } from '@/server/scenarios/incident-handover';
+import { verifyScenario, verifyAllScenarios } from '@/server/scenarios/verify';
 
 const SCENARIO_SEEDS: Record<string, (db: ReturnType<typeof getDb>) => void> = {
   'checkout-5xx': seedCheckout5xx,
@@ -16,13 +17,13 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const { action, scenarioId } = body as {
-      action: 'load' | 'reset';
+      action: 'load' | 'reset' | 'verify';
       scenarioId?: string;
     };
 
-    if (!action || !['load', 'reset'].includes(action)) {
+    if (!action || !['load', 'reset', 'verify'].includes(action)) {
       return NextResponse.json(
-        { error: "Missing or invalid 'action'. Must be 'load' or 'reset'." },
+        { error: "Missing or invalid 'action'. Must be 'load', 'reset', or 'verify'." },
         { status: 400 }
       );
     }
@@ -30,6 +31,21 @@ export async function POST(req: NextRequest) {
     if (action === 'reset') {
       resetDatabase();
       return NextResponse.json({ success: true, message: 'Database reset successfully.' });
+    }
+
+    if (action === 'verify') {
+      const db = getDb();
+      if (scenarioId) {
+        const result = verifyScenario(scenarioId, db);
+        return NextResponse.json(result);
+      }
+      const results = verifyAllScenarios(db);
+      const allPassed = results.every((r) => r.passed);
+      return NextResponse.json({
+        allPassed,
+        results,
+        summary: `${results.filter((r) => r.passed).length}/${results.length} 시나리오 통과`,
+      });
     }
 
     if (!scenarioId) {

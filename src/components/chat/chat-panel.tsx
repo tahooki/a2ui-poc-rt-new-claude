@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
@@ -11,6 +11,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { useOperator } from "@/lib/operators";
 import { ChatMessage } from "./chat-message";
 import { cn } from "@/lib/utils";
+import type { UIMessage } from "ai";
 
 interface ChatPanelProps {
   isOpen: boolean;
@@ -75,12 +76,38 @@ function getChatPage(pathname: string): string {
   return page || "dashboard";
 }
 
+/** Convert a DB message row into a UIMessage for the useChat hook. */
+function dbMessageToUIMessage(row: {
+  id: string;
+  role: string;
+  content: string;
+}): UIMessage {
+  return {
+    id: row.id,
+    role: row.role as UIMessage["role"],
+    parts: [{ type: "text" as const, text: row.content }],
+  };
+}
+
+/** Extract plain text content from a UIMessage's parts. */
+function extractTextContent(message: UIMessage): string {
+  return message.parts
+    .filter((p): p is { type: "text"; text: string } => p.type === "text")
+    .map((p) => p.text)
+    .join("\n");
+}
+
 export function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
   const pathname = usePathname();
   const { currentOperator } = useOperator();
   const [inputValue, setInputValue] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // Persistence state
+  const threadIdRef = useRef<string | null>(null);
+  const savedMessageIdsRef = useRef<Set<string>>(new Set());
+  const prevStatusRef = useRef<string>("");
 
   const pageContext = currentOperator
     ? {
@@ -92,7 +119,7 @@ export function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
   const pageContextRef = useRef(pageContext);
   pageContextRef.current = pageContext;
 
-  const { messages, sendMessage, status } = useChat({
+  const { messages, setMessages, sendMessage, status } = useChat({
     transport: new DefaultChatTransport({
       api: "/api/chat",
       body: () =>
@@ -105,6 +132,119 @@ export function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
   const isLoading = status === "submitted" || status === "streaming";
   const canSend = Boolean(currentOperator) && !isLoading;
   const suggestions = getPageSuggestions(pathname);
+
+  // Load existing thread + messages on mount (when operator is available)
+  useEffect(() => {
+    if (!currentOperator) return;
+    const page = getChatPage(pathname);
+
+    let cancelled = false;
+
+    async function loadThread() {
+      try {
+        const res = await fetch(
+          `/api/chat/threads?operatorId=${encodeURIComponent(currentOperator!.id)}&page=${encodeURIComponent(page)}`
+        );
+        if (!res.ok || cancelled) return;
+
+        const data = await res.json();
+        if (cancelled) return;
+
+        if (data.threadId && data.messages?.length > 0) {
+          threadIdRef.current = data.threadId;
+          const uiMessages: UIMessage[] = data.messages
+            .filter((m: { role: string }) => m.role === "user" || m.role === "assistant")
+            .map(dbMessageToUIMessage);
+
+          // Mark all loaded messages as already saved
+          for (const m of data.messages) {
+            savedMessageIdsRef.current.add(m.id);
+          }
+
+          if (uiMessages.length > 0) {
+            setMessages(uiMessages);
+          }
+        } else {
+          threadIdRef.current = null;
+        }
+      } catch (err) {
+        console.error("[ChatPanel] Failed to load thread:", err);
+      }
+    }
+
+    // Reset state when page/operator changes
+    threadIdRef.current = null;
+    savedMessageIdsRef.current = new Set();
+
+    loadThread();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentOperator?.id, pathname]);
+
+  // Persist new messages when status transitions from streaming/submitted to ready
+  useEffect(() => {
+    const prevStatus = prevStatusRef.current;
+    prevStatusRef.current = status;
+
+    const wasActive = prevStatus === "streaming" || prevStatus === "submitted";
+    const isNowReady = status === "ready";
+
+    if (!wasActive || !isNowReady) return;
+    if (!currentOperator || messages.length === 0) return;
+
+    const page = getChatPage(pathname);
+
+    async function persistMessages() {
+      try {
+        // Ensure we have a thread
+        if (!threadIdRef.current) {
+          const res = await fetch("/api/chat/threads", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              operatorId: currentOperator!.id,
+              page,
+            }),
+          });
+          if (!res.ok) return;
+          const thread = await res.json();
+          threadIdRef.current = thread.id;
+        }
+
+        const threadId = threadIdRef.current!;
+
+        // Save any messages that haven't been saved yet
+        for (const msg of messages) {
+          if (savedMessageIdsRef.current.has(msg.id)) continue;
+          if (msg.role !== "user" && msg.role !== "assistant") continue;
+
+          const content = extractTextContent(msg);
+
+          try {
+            await fetch(`/api/chat/threads/${encodeURIComponent(threadId)}/messages`, {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                id: msg.id,
+                role: msg.role,
+                content,
+              }),
+            });
+            savedMessageIdsRef.current.add(msg.id);
+          } catch (err) {
+            console.error("[ChatPanel] Failed to save message:", msg.id, err);
+          }
+        }
+      } catch (err) {
+        console.error("[ChatPanel] Failed to persist messages:", err);
+      }
+    }
+
+    persistMessages();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status]);
 
   // Auto-scroll to bottom on new messages
   useEffect(() => {
@@ -139,6 +279,49 @@ export function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
     setInputValue("");
     sendMessage({ text: suggestion });
   }
+
+  const handleA2UIAction = useCallback(
+    async (actionName: string, context: Record<string, unknown>) => {
+      if (!currentOperator) return;
+
+      // Convert context values to strings (A2UI context uses literalString format)
+      const stringContext: Record<string, string> = {};
+      for (const [key, val] of Object.entries(context)) {
+        stringContext[key] = String(val ?? "");
+      }
+
+      try {
+        const res = await fetch("/api/a2ui-action", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            actionName,
+            context: stringContext,
+            actorId: currentOperator.id,
+          }),
+        });
+
+        const result = await res.json();
+
+        if (result.success && result.message) {
+          // Send the action result as a follow-up message to the chat
+          sendMessage({
+            text: `[A2UI 작업 완료] ${result.message}`,
+          });
+        } else if (result.error) {
+          sendMessage({
+            text: `[A2UI 작업 실패] ${result.error}`,
+          });
+        }
+      } catch (err) {
+        console.error("[A2UI Action Error]", err);
+        sendMessage({
+          text: `[A2UI 작업 오류] 작업 실행 중 오류가 발생했습니다: ${actionName}`,
+        });
+      }
+    },
+    [currentOperator, sendMessage],
+  );
 
   return (
     <>
@@ -224,7 +407,7 @@ export function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
             ) : (
               <>
                 {messages.map((message) => (
-                  <ChatMessage key={message.id} message={message} />
+                  <ChatMessage key={message.id} message={message} onA2UIAction={handleA2UIAction} />
                 ))}
 
                 {/* Loading indicator */}

@@ -6,7 +6,12 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "scenario:load": "node scripts/scenario-cli.mjs load",
+    "scenario:verify": "node scripts/scenario-cli.mjs verify",
+    "scenario:reset": "node scripts/scenario-cli.mjs reset",
+    "scenario:list": "node scripts/scenario-cli.mjs list",
+    "test:smoke": "node scripts/playwright-smoke.mjs"
   },
   "dependencies": {
     "@a2ui/react": "file:vendor/google-a2ui/react",

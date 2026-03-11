@@ -379,6 +379,40 @@ export function countAuditLogs() {
   return (getDb().prepare('SELECT COUNT(*) as count FROM audit_logs').get() as { count: number }).count;
 }
 
+// ─── Chat helpers ───
+
+export function getChatThread(operatorId: string, page: string) {
+  return getDb()
+    .prepare('SELECT * FROM chat_threads WHERE operator_id = ? AND page = ? ORDER BY updated_at DESC LIMIT 1')
+    .get(operatorId, page) as { id: string; page: string; selected_entity_id: string | null; operator_id: string; created_at: string; updated_at: string } | undefined;
+}
+
+export function createChatThread(id: string, operatorId: string, page: string, selectedEntityId?: string) {
+  getDb()
+    .prepare('INSERT INTO chat_threads (id, operator_id, page, selected_entity_id) VALUES (?, ?, ?, ?)')
+    .run(id, operatorId, page, selectedEntityId ?? null);
+  return getDb().prepare('SELECT * FROM chat_threads WHERE id = ?').get(id);
+}
+
+export function getChatMessages(threadId: string) {
+  return getDb()
+    .prepare('SELECT * FROM chat_messages WHERE thread_id = ? ORDER BY created_at ASC')
+    .all(threadId);
+}
+
+export function saveChatMessage(id: string, threadId: string, role: string, content: string, toolName?: string, toolResult?: string) {
+  getDb()
+    .prepare('INSERT INTO chat_messages (id, thread_id, role, content, tool_name, tool_result) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(id, threadId, role, content, toolName ?? null, toolResult ?? null);
+  return getDb().prepare('SELECT * FROM chat_messages WHERE id = ?').get(id);
+}
+
+export function updateChatThreadTimestamp(threadId: string) {
+  getDb()
+    .prepare("UPDATE chat_threads SET updated_at = datetime('now') WHERE id = ?")
+    .run(threadId);
+}
+
 export function resetDatabase() {
   const db = getDb();
   const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all() as { name: string }[];
