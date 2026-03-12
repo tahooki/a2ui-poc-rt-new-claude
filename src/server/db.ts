@@ -802,6 +802,77 @@ export function clearA2UITemplateOverride(
     .run(templateId, scopeType, scopeValue);
 }
 
+export function updateA2UITemplatePromptHint(id: string, promptHint: string) {
+  getDb()
+    .prepare("UPDATE a2ui_templates SET prompt_hint = ?, updated_at = datetime('now') WHERE id = ?")
+    .run(promptHint, id);
+  return getA2UITemplate(id);
+}
+
+export function replaceA2UITemplateRulesByType(
+  templateId: string,
+  ruleType: 'keyword' | 'page' | 'role',
+  values: string[],
+) {
+  const db = getDb();
+  const deleteStmt = db.prepare(
+    'DELETE FROM a2ui_template_rules WHERE template_id = ? AND rule_type = ?',
+  );
+  const insertStmt = db.prepare(
+    `INSERT INTO a2ui_template_rules (id, template_id, rule_type, rule_value, priority, created_at)
+     VALUES (?, ?, ?, ?, ?, datetime('now'))`,
+  );
+
+  db.transaction(() => {
+    deleteStmt.run(templateId, ruleType);
+    values.forEach((value, index) => {
+      const id = `${templateId}_${ruleType}_${value.replace(/\s+/g, '_').toLowerCase()}`;
+      insertStmt.run(id, templateId, ruleType, value, (index + 1) * 10);
+    });
+  })();
+}
+
+export function replaceA2UITemplateDecisionInputs(
+  templateId: string,
+  inputs: Array<{
+    input_key: string;
+    label: string;
+    description: string;
+    required: boolean;
+    source: string;
+    default_value: string | null;
+    priority: number;
+  }>,
+) {
+  const db = getDb();
+  const deleteStmt = db.prepare(
+    'DELETE FROM a2ui_template_decision_inputs WHERE template_id = ?',
+  );
+  const insertStmt = db.prepare(
+    `INSERT INTO a2ui_template_decision_inputs
+      (id, template_id, input_key, label, description, required, source, default_value, priority, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
+  );
+
+  db.transaction(() => {
+    deleteStmt.run(templateId);
+    inputs.forEach((input) => {
+      const id = `${templateId}_input_${input.input_key}`;
+      insertStmt.run(
+        id,
+        templateId,
+        input.input_key,
+        input.label,
+        input.description,
+        input.required ? 1 : 0,
+        input.source,
+        input.default_value,
+        input.priority,
+      );
+    });
+  })();
+}
+
 export function logA2UITemplateSelection(input: {
   templateId?: string | null;
   threadId?: string | null;

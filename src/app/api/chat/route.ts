@@ -32,7 +32,8 @@ import {
 } from '@/server/scenarios/a2ui-question-catalog';
 import {
   buildTemplateDecisionCandidates,
-  decideTemplateWithAI,
+  selectTemplateWithAI,
+  buildToolArgsWithAI,
   type TemplateDecisionOutcome,
 } from '@/server/ai/template-decision';
 
@@ -79,183 +80,7 @@ function hasA2UIIntent(
   return hasUiSignal || (hasRenderVerb && hasTemplateKeywordSignal);
 }
 
-function getCollectedString(
-  collectedInputs: Record<string, string | number | boolean | null> | undefined,
-  ...keys: string[]
-) {
-  if (!collectedInputs) {
-    return null;
-  }
-
-  for (const key of keys) {
-    const value = collectedInputs[key];
-    if (typeof value === 'string' && value.trim().length > 0) {
-      return value.trim();
-    }
-  }
-
-  return null;
-}
-
-function inferDeploymentTargetId(
-  context: PageContext,
-  collectedInputs?: Record<string, string | number | boolean | null>,
-) {
-  const decisionTargetId = getCollectedString(
-    collectedInputs,
-    'selectedDeploymentId',
-    'selectedEntityId',
-  );
-  if (decisionTargetId?.startsWith('dep_')) {
-    return decisionTargetId;
-  }
-
-  return context.selectedEntityId?.startsWith('dep_') ? context.selectedEntityId : 'latest';
-}
-
-function inferIncidentTargetId(
-  context: PageContext,
-  collectedInputs?: Record<string, string | number | boolean | null>,
-) {
-  const decisionTargetId = getCollectedString(
-    collectedInputs,
-    'selectedIncidentId',
-    'selectedEntityId',
-  );
-  if (decisionTargetId?.startsWith('inc_')) {
-    return decisionTargetId;
-  }
-
-  return context.selectedEntityId?.startsWith('inc_') ? context.selectedEntityId : 'active_incident';
-}
-
-function inferJobRunTargetId(
-  context: PageContext,
-  collectedInputs?: Record<string, string | number | boolean | null>,
-) {
-  const decisionTargetId = getCollectedString(
-    collectedInputs,
-    'selectedJobRunId',
-    'selectedEntityId',
-  );
-  if (decisionTargetId?.startsWith('job_')) {
-    return decisionTargetId;
-  }
-
-  return context.selectedEntityId?.startsWith('job_') ? context.selectedEntityId : 'latest_job';
-}
-
-function inferConfirmActionType(
-  context: PageContext,
-  userText: string,
-  collectedInputs?: Record<string, string | number | boolean | null>,
-) {
-  const normalizedUserText = normalizeQuestionForMatch(userText);
-  const selectedEntityId = getCollectedString(
-    collectedInputs,
-    'selectedEntityId',
-    'selectedJobRunId',
-    'selectedIncidentId',
-    'selectedDeploymentId',
-  );
-
-  if (
-    selectedEntityId?.startsWith('job_') ||
-    context.selectedEntityId?.startsWith('job_') ||
-    context.page === 'jobs' ||
-    normalizedUserText.includes('job') ||
-    normalizedUserText.includes('잡')
-  ) {
-    return 'job_execute' as const;
-  }
-
-  if (
-    selectedEntityId?.startsWith('inc_') ||
-    context.selectedEntityId?.startsWith('inc_') ||
-    context.page === 'incidents' ||
-    normalizedUserText.includes('인시던트') ||
-    normalizedUserText.includes('incident')
-  ) {
-    return 'incident_close' as const;
-  }
-
-  return 'rollback' as const;
-}
-
-function inferReportType(context: PageContext, userText: string) {
-  const normalizedUserText = normalizeQuestionForMatch(userText);
-
-  if (
-    normalizedUserText.includes('postmortem') ||
-    normalizedUserText.includes('포스트모템')
-  ) {
-    return 'incident_postmortem' as const;
-  }
-
-  if (
-    normalizedUserText.includes('weekly') ||
-    normalizedUserText.includes('주간')
-  ) {
-    return 'weekly_ops' as const;
-  }
-
-  if (
-    normalizedUserText.includes('배포 리뷰') ||
-    normalizedUserText.includes('deployment review')
-  ) {
-    return 'deployment_review' as const;
-  }
-
-  if (context.page === 'reports' || context.page === 'incidents') {
-    return 'incident_postmortem' as const;
-  }
-
-  return 'default' as const;
-}
-
-function buildTemplateToolArgs(
-  template: A2UITemplateAvailability,
-  context: PageContext,
-  userText: string,
-  collectedInputs?: Record<string, string | number | boolean | null>,
-) {
-  switch (template.tool_name) {
-    case 'renderRollbackCard':
-    case 'renderDryRunStepperCard':
-      return {
-        deploymentId: inferDeploymentTargetId(context, collectedInputs),
-      };
-    case 'renderEvidenceCard':
-      return {
-        incidentId: inferIncidentTargetId(context, collectedInputs),
-      };
-    case 'renderJobReviewCard':
-      return {
-        jobRunId: inferJobRunTargetId(context, collectedInputs),
-      };
-    case 'renderConfirmCard': {
-      const actionType = inferConfirmActionType(context, userText, collectedInputs);
-      const targetId =
-        actionType === 'job_execute'
-          ? inferJobRunTargetId(context, collectedInputs)
-          : actionType === 'incident_close'
-            ? inferIncidentTargetId(context, collectedInputs)
-            : inferDeploymentTargetId(context, collectedInputs);
-
-      return {
-        actionType,
-        targetId,
-      };
-    }
-    case 'renderReportTemplateCard':
-      return {
-        incidentId: inferIncidentTargetId(context, collectedInputs),
-        reportType: inferReportType(context, userText),
-      };
-    default:
-      return null;
-  }
-}
+// infer 함수들은 template-decision.ts의 buildToolArgsWithAI / buildToolArgsByHeuristic으로 이동됨
 
 function findForcedA2UIQuestionCase(
   context: PageContext,
@@ -796,7 +621,9 @@ export async function POST(req: Request) {
         hasActivePendingTemplateDecision && pendingTemplateDecision
           ? `${pendingTemplateDecision.originalUserText}\n추가 판단근거: ${userText}`
           : userText;
-      const decision = await decideTemplateWithAI({
+
+      // ── 1차 AI 호출: 템플릿 선택 ──
+      const decision = await selectTemplateWithAI({
         userText: decisionUserText,
         context,
         scenarioId: currentScenarioId,
@@ -833,25 +660,29 @@ export async function POST(req: Request) {
       if (decision.selectedTemplate) {
         clearPendingTemplateDecisionState(context.operatorId, context.page);
         const selectedTemplate = decision.selectedTemplate;
-        const toolArgs = buildTemplateToolArgs(
+
+        // ── 2차 AI 호출: tool args 생성 ──
+        const renderPlan = await buildToolArgsWithAI({
           selectedTemplate,
+          userText: decisionUserText,
           context,
-          decisionUserText,
-          decision.selectedCandidate?.collectedInputs,
-        );
-        if (!toolArgs) {
+          scenarioId: currentScenarioId,
+          apiKey,
+        });
+
+        if (!renderPlan) {
           logA2UITemplateSelection({
             templateId: selectedTemplate.id,
             page: context.page,
             scenarioId: currentScenarioId,
             operatorId: context.operatorId,
             userMessage: userText,
-            selectionReason: '선택된 템플릿의 tool args를 생성하지 못했습니다.',
+            selectionReason: '2차 AI 호출에서 tool args를 생성하지 못했습니다.',
             decisionPayload: decision,
             status: 'blocked',
           });
         } else {
-          const selectedToolName = selectedTemplate.tool_name;
+          const selectedToolName = renderPlan.toolName;
           const selectedTool = (
             aiTools as Record<
               string,
@@ -860,7 +691,7 @@ export async function POST(req: Request) {
           )[selectedToolName];
 
           if (selectedTool?.execute) {
-            const selectedOutputRaw = await selectedTool.execute(toolArgs);
+            const selectedOutputRaw = await selectedTool.execute(renderPlan.toolArgs);
             const selectedOutput = attachDecisionEnvelope(selectedOutputRaw, {
               template: selectedTemplate,
               decision,
@@ -873,8 +704,8 @@ export async function POST(req: Request) {
               scenarioId: currentScenarioId,
               operatorId: context.operatorId,
               userMessage: userText,
-              selectionReason: decision.decisionReason,
-              decisionPayload: decision,
+              selectionReason: `${decision.decisionReason} [2차: ${renderPlan.toolName}(${JSON.stringify(renderPlan.toolArgs)})]`,
+              decisionPayload: { ...decision, renderPlan },
               status: 'selected',
             });
 
@@ -882,7 +713,7 @@ export async function POST(req: Request) {
               messages,
               {
                 expectedToolName: selectedToolName,
-                toolArgs,
+                toolArgs: renderPlan.toolArgs,
               },
               selectedOutput,
             );

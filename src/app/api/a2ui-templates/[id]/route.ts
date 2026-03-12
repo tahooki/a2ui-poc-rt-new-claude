@@ -3,7 +3,10 @@ import {
   clearA2UITemplateOverride,
   getA2UITemplate,
   getCurrentScenarioId,
+  replaceA2UITemplateDecisionInputs,
+  replaceA2UITemplateRulesByType,
   updateA2UITemplateEnabled,
+  updateA2UITemplatePromptHint,
   upsertA2UITemplateOverride,
 } from "@/server/db";
 
@@ -25,6 +28,55 @@ export async function PATCH(
     if (typeof body?.isEnabled === "boolean") {
       updateA2UITemplateEnabled(id, body.isEnabled);
       updates["isEnabled"] = body.isEnabled;
+    }
+
+    if (Array.isArray(body?.keywords)) {
+      replaceA2UITemplateRulesByType(id, "keyword", body.keywords);
+      updates["keywords"] = body.keywords;
+    }
+
+    if (Array.isArray(body?.allowedPages)) {
+      replaceA2UITemplateRulesByType(id, "page", body.allowedPages);
+      updates["allowedPages"] = body.allowedPages;
+    }
+
+    if (Array.isArray(body?.allowedRoles)) {
+      replaceA2UITemplateRulesByType(id, "role", body.allowedRoles);
+      updates["allowedRoles"] = body.allowedRoles;
+    }
+
+    if (typeof body?.promptHint === "string") {
+      updateA2UITemplatePromptHint(id, body.promptHint);
+      updates["promptHint"] = body.promptHint;
+    }
+
+    if (Array.isArray(body?.decisionInputs)) {
+      replaceA2UITemplateDecisionInputs(
+        id,
+        body.decisionInputs.map(
+          (
+            input: {
+              input_key?: string;
+              label?: string;
+              description?: string;
+              required?: boolean;
+              source?: string;
+              default_value?: string | null;
+              priority?: number;
+            },
+            index: number,
+          ) => ({
+            input_key: String(input.input_key ?? ""),
+            label: String(input.label ?? ""),
+            description: String(input.description ?? ""),
+            required: Boolean(input.required),
+            source: String(input.source ?? "derived"),
+            default_value: input.default_value ?? null,
+            priority: typeof input.priority === "number" ? input.priority : (index + 1) * 10,
+          }),
+        ),
+      );
+      updates["decisionInputs"] = body.decisionInputs;
     }
 
     if ("scenarioEnabled" in body) {

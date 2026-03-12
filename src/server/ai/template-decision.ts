@@ -6,8 +6,14 @@ import type {
   A2UITemplateAvailability,
   TemplateDecisionInputRecord,
 } from '@/server/ai/template-service';
+import {
+  getToolParameterSpec,
+  formatToolParamSpecForPrompt,
+} from '@/server/ai/tool-parameter-spec';
 
-const decisionSchema = z.object({
+// ─── Schemas ────────────────────────────────────────────────────────────────
+
+const selectTemplateSchema = z.object({
   selectedTemplateId: z.string().nullable(),
   confidence: z.number().min(0).max(1),
   decisionReason: z.string().min(1),
@@ -17,6 +23,14 @@ const decisionSchema = z.object({
   shouldAskFollowUp: z.boolean().default(false),
   followUpQuestion: z.string().optional(),
 });
+
+const buildToolArgsSchema = z.object({
+  toolName: z.string(),
+  toolArgs: z.record(z.string(), z.unknown()),
+  cardType: z.string(),
+});
+
+// ─── Types ──────────────────────────────────────────────────────────────────
 
 export interface TemplateDecisionResult {
   selectedTemplateId: string | null;
@@ -42,6 +56,12 @@ export interface TemplateDecisionOutcome extends TemplateDecisionResult {
   strategy: 'rule+ai_second_pass' | 'rule+heuristic_fallback';
 }
 
+export interface ToolArgsResult {
+  toolName: string;
+  toolArgs: Record<string, unknown>;
+  cardType: string;
+}
+
 interface DecideTemplateWithAIParams {
   userText: string;
   context: PageContext;
@@ -56,6 +76,16 @@ interface BuildTemplateDecisionCandidatesParams {
   context: PageContext;
   scenarioId: string;
 }
+
+interface BuildToolArgsWithAIParams {
+  selectedTemplate: A2UITemplateAvailability;
+  userText: string;
+  context: PageContext;
+  scenarioId: string;
+  apiKey?: string;
+}
+
+// ─── Input Collection Helpers ───────────────────────────────────────────────
 
 function normalizeToken(value: string) {
   return value.trim().toLowerCase();
@@ -226,6 +256,8 @@ export function buildTemplateDecisionCandidates(
   });
 }
 
+// ─── Follow-up Question Builders ────────────────────────────────────────────
+
 function buildFollowUpQuestion(candidate: TemplateDecisionCandidate) {
   const missingLabels = candidate.template.decisionInputs
     .filter((inputDef) => candidate.missingInputKeys.includes(inputDef.input_key))
@@ -249,6 +281,8 @@ function buildAmbiguityFollowUpQuestion(candidates: TemplateDecisionCandidate[])
 
   return `원하는 형태를 조금 더 구체적으로 알려주세요. 예: ${labels.join(', ')}`;
 }
+
+// ─── Heuristic Fallback ─────────────────────────────────────────────────────
 
 function chooseByHeuristic(
   candidates: TemplateDecisionCandidate[],
@@ -325,6 +359,8 @@ function chooseByHeuristic(
   };
 }
 
+// ─── Sanitize ───────────────────────────────────────────────────────────────
+
 function sanitizeDecisionOutcome(
   raw: TemplateDecisionResult,
   candidates: TemplateDecisionCandidate[],
@@ -361,7 +397,9 @@ function sanitizeDecisionOutcome(
   };
 }
 
-export async function decideTemplateWithAI(
+// ─── 1차 AI 호출: 템플릿 선택 ───────────────────────────────────────────────
+
+export async function selectTemplateWithAI(
   params: DecideTemplateWithAIParams,
 ): Promise<TemplateDecisionOutcome> {
   const candidates = buildTemplateDecisionCandidates({
@@ -436,7 +474,7 @@ export async function decideTemplateWithAI(
 
     const { object } = await generateObject({
       model: openai('gpt-4o-mini'),
-      schema: decisionSchema,
+      schema: selectTemplateSchema,
       system:
         '당신은 A2UI 템플릿 라우팅 판별기입니다. 반드시 후보 목록 내부의 templateId만 선택하고, 선택 근거를 간결하게 작성하세요.',
       prompt: [
@@ -450,6 +488,7 @@ export async function decideTemplateWithAI(
         '규칙:',
         '- selectedTemplateId는 반드시 후보 templateId 중 하나이거나 null 이어야 한다.',
         '- 질문 의도와 가장 맞는 템플릿 1개만 선택한다.',
+        '- 각 템플릿의 promptHint와 keywords를 주요 판단 근거로 사용한다.',
         '- missingInputs는 선택 템플릿의 누락 key만 넣는다.',
         '- 질문으로 템플릿 선택이 불가능하면 selectedTemplateId를 null로 둔다.',
       ].join('\n'),
@@ -465,3 +504,160 @@ export async function decideTemplateWithAI(
     return chooseByHeuristic(candidates, params.userText);
   }
 }
+
+// ─── 2차 AI 호출: tool args 생성 ────────────────────────────────────────────
+
+export async function buildToolArgsWithAI(
+  params: BuildToolArgsWithAIParams,
+): Promise<ToolArgsResult | null> {
+  const { selectedTemplate, userText, context, scenarioId } = params;
+  const paramSpec = getToolParameterSpec(selectedTemplate.tool_name);
+
+  if (!paramSpec) {
+    return buildToolArgsByHeuristic(selectedTemplate, context, userText);
+  }
+
+  const hasValidApiKey =
+    typeof params.apiKey === 'string' &&
+    params.apiKey.trim().length > 0 &&
+    !params.apiKey.includes('your') &&
+    !params.apiKey.includes('here');
+
+  if (!hasValidApiKey) {
+    return buildToolArgsByHeuristic(selectedTemplate, context, userText);
+  }
+
+  try {
+    const { object } = await generateObject({
+      model: openai('gpt-4o-mini'),
+      schema: buildToolArgsSchema,
+      system:
+        '당신은 A2UI 카드 렌더링 데이터 생성기입니다. 선택된 템플릿의 tool을 실행하기 위한 정확한 인자를 생성하세요.',
+      prompt: [
+        `사용자 질문: ${userText || '(없음)'}`,
+        `현재 페이지: ${context.page}`,
+        `운영자 역할: ${context.operatorRole}`,
+        `시나리오: ${scenarioId}`,
+        `선택된 엔티티 ID: ${context.selectedEntityId ?? '없음'}`,
+        '',
+        '선택된 템플릿 정보:',
+        `  이름: ${selectedTemplate.name}`,
+        `  설명: ${selectedTemplate.description}`,
+        `  promptHint: ${selectedTemplate.prompt_hint}`,
+        '',
+        '실행할 tool 스펙:',
+        formatToolParamSpecForPrompt(paramSpec),
+        '',
+        '규칙:',
+        `- toolName은 반드시 "${selectedTemplate.tool_name}"이어야 한다.`,
+        `- cardType은 반드시 "${selectedTemplate.card_type}"이어야 한다.`,
+        '- toolArgs의 각 필드는 위 파라미터 스펙에 정의된 이름과 타입을 따른다.',
+        '- enum 타입은 반드시 허용 값 중 하나여야 한다.',
+        '- ID를 특정할 수 없으면 스펙에 정의된 defaultAlias를 사용한다.',
+        '- 선택된 엔티티 ID가 해당 타입이면 그것을 우선 사용한다.',
+        '  (dep_ 접두사 → deploymentId, inc_ → incidentId, job_ → jobRunId)',
+      ].join('\n'),
+    });
+
+    // Validate toolName and cardType match
+    if (object.toolName !== selectedTemplate.tool_name) {
+      object.toolName = selectedTemplate.tool_name;
+    }
+    if (object.cardType !== selectedTemplate.card_type) {
+      object.cardType = selectedTemplate.card_type;
+    }
+
+    return object;
+  } catch {
+    return buildToolArgsByHeuristic(selectedTemplate, context, userText);
+  }
+}
+
+// ─── Heuristic tool args fallback ───────────────────────────────────────────
+
+function buildToolArgsByHeuristic(
+  template: A2UITemplateAvailability,
+  context: PageContext,
+  userText: string,
+): ToolArgsResult | null {
+  const paramSpec = getToolParameterSpec(template.tool_name);
+  if (!paramSpec) return null;
+
+  const toolArgs: Record<string, unknown> = {};
+
+  for (const param of paramSpec.params) {
+    if (param.type === 'enum' && param.enumValues) {
+      // Try to infer from context
+      const inferred = inferEnumValue(param, context, userText);
+      toolArgs[param.name] = inferred ?? param.enumValues[0];
+    } else {
+      // String ID param — try to use context entity or default alias
+      const contextId = inferIdFromContext(param.name, context);
+      toolArgs[param.name] = contextId ?? param.defaultAlias ?? 'latest';
+    }
+  }
+
+  return {
+    toolName: template.tool_name,
+    toolArgs,
+    cardType: template.card_type,
+  };
+}
+
+function inferIdFromContext(paramName: string, context: PageContext): string | null {
+  const entityId = context.selectedEntityId;
+  if (!entityId) return null;
+
+  const normalized = paramName.toLowerCase();
+
+  if (normalized.includes('deployment') && entityId.startsWith('dep_')) return entityId;
+  if (normalized.includes('incident') && entityId.startsWith('inc_')) return entityId;
+  if (normalized.includes('job') && entityId.startsWith('job_')) return entityId;
+  if (normalized === 'targetid') return entityId;
+
+  return null;
+}
+
+function inferEnumValue(
+  param: { name: string; enumValues?: string[] },
+  context: PageContext,
+  userText: string,
+): string | null {
+  if (!param.enumValues) return null;
+  const normalizedText = normalizeToken(userText);
+
+  if (param.name === 'actionType') {
+    if (context.selectedEntityId?.startsWith('job_') || context.page === 'jobs' ||
+        normalizedText.includes('job') || normalizedText.includes('잡')) {
+      return 'job_execute';
+    }
+    if (context.selectedEntityId?.startsWith('inc_') || context.page === 'incidents' ||
+        normalizedText.includes('인시던트') || normalizedText.includes('incident')) {
+      return 'incident_close';
+    }
+    return 'rollback';
+  }
+
+  if (param.name === 'reportType') {
+    if (normalizedText.includes('postmortem') || normalizedText.includes('포스트모템')) {
+      return 'incident_postmortem';
+    }
+    if (normalizedText.includes('weekly') || normalizedText.includes('주간')) {
+      return 'weekly_ops';
+    }
+    if (normalizedText.includes('배포 리뷰') || normalizedText.includes('deployment review')) {
+      return 'deployment_review';
+    }
+    return context.page === 'reports' || context.page === 'incidents'
+      ? 'incident_postmortem'
+      : 'default';
+  }
+
+  return null;
+}
+
+// ─── Legacy compatibility export ────────────────────────────────────────────
+// decideTemplateWithAI is kept as an alias for selectTemplateWithAI
+// so that existing imports continue to work during migration.
+
+export const decideTemplateWithAI = selectTemplateWithAI;
