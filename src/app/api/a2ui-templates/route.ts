@@ -6,7 +6,23 @@ import {
   getA2UITemplateOverrides,
   getA2UITemplateRules,
 } from "@/server/db";
+import { getDataSourceDefinition, listBindingsForTemplate } from "@/server/a2ui";
 import { listScenarios } from "@/server/scenarios";
+import { A2UI_SCENARIO_QUESTION_CASES } from "@/server/scenarios/a2ui-question-catalog";
+
+function collectTemplateArgKeys(
+  bindings: Array<{ inputMapping: Record<string, string> }>,
+) {
+  return [
+    ...new Set(
+      bindings.flatMap((binding) =>
+        Object.values(binding.inputMapping)
+          .filter((value) => value.startsWith("$args."))
+          .map((value) => value.slice("$args.".length)),
+      ),
+    ),
+  ].sort();
+}
 
 export async function GET() {
   try {
@@ -54,12 +70,42 @@ export async function GET() {
           override["scope_type"] === "scenario" &&
           override["scope_value"] === currentScenarioId,
       );
+      const bindings = listBindingsForTemplate(templateId);
+      const sampleCases = A2UI_SCENARIO_QUESTION_CASES.filter(
+        (questionCase) =>
+          questionCase.scenarioId === currentScenarioId &&
+          questionCase.expectedToolName === String(template["tool_name"] ?? ""),
+      );
+      const primarySampleCase = sampleCases[0];
 
       return {
         ...template,
         rules: rulesByTemplate[templateId] ?? [],
         overrides: templateOverrides,
         decision_inputs: decisionInputsByTemplate[templateId] ?? [],
+        bindings: bindings.map((binding) => ({
+          id: binding.id,
+          slot: binding.slot,
+          required: binding.required,
+          output_key: binding.outputKey,
+          input_mapping: binding.inputMapping,
+          source: getDataSourceDefinition(binding.sourceId),
+        })),
+        sample_cases: sampleCases.map((sampleCase) => ({
+          id: sampleCase.id,
+          question: sampleCase.question,
+          page: sampleCase.page,
+          operatorRole: sampleCase.operatorRole,
+          args: sampleCase.toolArgs,
+          note: sampleCase.note ?? null,
+        })),
+        preview_args: collectTemplateArgKeys(bindings).map((name) => ({
+          name,
+          sample_value:
+            primarySampleCase && typeof primarySampleCase.toolArgs[name] !== "undefined"
+              ? String(primarySampleCase.toolArgs[name] ?? "")
+              : "",
+        })),
         scenario_override_enabled:
           scenarioOverride && typeof scenarioOverride["enabled"] === "number"
             ? Number(scenarioOverride["enabled"]) === 1

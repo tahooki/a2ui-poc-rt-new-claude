@@ -16,9 +16,9 @@ import {
   getAllIncidents,
   getAllDeployments,
   getAllJobRuns,
-  getAllJobTemplates,
   getCurrentScenarioId,
 } from '@/server/db';
+import { renderTemplatePreview } from '@/server/a2ui';
 
 const ACTIVE_INCIDENT_STATUSES = new Set(['open', 'investigating', 'mitigated']);
 const DEPLOYMENT_REFERENCE_ALIASES = new Set([
@@ -164,6 +164,20 @@ function resolveJobRunReference(jobRunId: string) {
   );
 
   return String(activeJobRun?.['id'] ?? jobRuns[0]?.['id'] ?? jobRunId);
+}
+
+async function renderBoundTemplate(input: {
+  templateId: string;
+  args: Record<string, string>;
+  missingLabel: string;
+}) {
+  const preview = await renderTemplatePreview({
+    templateId: input.templateId,
+    args: input.args,
+    missingLabel: input.missingLabel,
+  });
+
+  return preview.output;
 }
 
 // ─── getIncidentDetail ───
@@ -800,23 +814,13 @@ export const renderRollbackCard = tool({
   }),
   execute: async ({ deploymentId }: { deploymentId: string }) => {
     const resolvedDeploymentId = resolveDeploymentReference(deploymentId);
-    const deployment = getDeployment(resolvedDeploymentId) as Record<string, unknown> | undefined;
-    if (!deployment) {
-      return { error: `배포를 찾을 수 없습니다: ${deploymentId}` };
-    }
-
-    const riskChecks = getDeploymentRiskChecks(resolvedDeploymentId) as Array<Record<string, unknown>>;
-    const rollbackPlan = getRollbackPlan(resolvedDeploymentId) as Record<string, unknown> | undefined;
-
-    return {
-      type: 'a2ui_render' as const,
-      cardType: 'rollback_summary',
-      cardData: {
-        deployment,
-        riskChecks,
-        rollbackPlan: rollbackPlan ?? null,
+    return await renderBoundTemplate({
+      templateId: 'tpl_rollback_summary',
+      args: {
+        deploymentId: resolvedDeploymentId,
       },
-    };
+      missingLabel: '롤백 판단 요약 템플릿',
+    });
   },
 });
 
@@ -830,21 +834,13 @@ export const renderEvidenceCard = tool({
   }),
   execute: async ({ incidentId }: { incidentId: string }) => {
     const resolvedIncidentId = resolveIncidentReference(incidentId);
-    const incident = getIncident(resolvedIncidentId) as Record<string, unknown> | undefined;
-    if (!incident) {
-      return { error: `인시던트를 찾을 수 없습니다: ${incidentId}` };
-    }
-
-    const evidence = getIncidentEvidence(resolvedIncidentId) as Array<Record<string, unknown>>;
-
-    return {
-      type: 'a2ui_render' as const,
-      cardType: 'evidence_comparison',
-      cardData: {
-        incident,
-        evidence,
+    return await renderBoundTemplate({
+      templateId: 'tpl_evidence_comparison',
+      args: {
+        incidentId: resolvedIncidentId,
       },
-    };
+      missingLabel: '인시던트 증거 비교 템플릿',
+    });
   },
 });
 
@@ -858,46 +854,13 @@ export const renderJobReviewCard = tool({
   }),
   execute: async ({ jobRunId }: { jobRunId: string }) => {
     const resolvedJobRunId = resolveJobRunReference(jobRunId);
-    const jobRun = getJobRun(resolvedJobRunId) as Record<string, unknown> | undefined;
-    if (!jobRun) {
-      return { error: `잡 실행을 찾을 수 없습니다: ${jobRunId}` };
-    }
-
-    const specParsed = (() => {
-      try {
-        return JSON.parse(jobRun['spec'] as string);
-      } catch {
-        return jobRun['spec'];
-      }
-    })();
-
-    const dryRunResultParsed = jobRun['dry_run_result']
-      ? (() => {
-          try {
-            return JSON.parse(jobRun['dry_run_result'] as string);
-          } catch {
-            return jobRun['dry_run_result'];
-          }
-        })()
-      : null;
-
-    // Find matching template by template_id
-    const templates = getAllJobTemplates() as Array<Record<string, unknown>>;
-    const template = templates.find((t) => t['id'] === jobRun['template_id']) ?? null;
-
-    return {
-      type: 'a2ui_render' as const,
-      cardType: 'job_spec_review',
-      cardData: {
-        jobRun: {
-          ...jobRun,
-          specParsed,
-          dryRunResultParsed,
-        },
-        template,
-        dryRunResult: dryRunResultParsed,
+    return await renderBoundTemplate({
+      templateId: 'tpl_job_spec_review',
+      args: {
+        jobRunId: resolvedJobRunId,
       },
-    };
+      missingLabel: 'Job Spec 검토 템플릿',
+    });
   },
 });
 
@@ -923,19 +886,14 @@ export const renderReportTemplateCard = tool({
     reportType: 'incident_postmortem' | 'deployment_review' | 'weekly_ops' | 'default';
   }) => {
     const resolvedIncidentId = resolveIncidentReference(incidentId);
-    const incident = getIncident(resolvedIncidentId) as Record<string, unknown> | undefined;
-    if (!incident) {
-      return { error: `인시던트를 찾을 수 없습니다: ${incidentId}` };
-    }
-
-    return {
-      type: 'a2ui_render' as const,
-      cardType: 'report_template',
-      cardData: {
-        incident,
+    return await renderBoundTemplate({
+      templateId: 'tpl_report_template',
+      args: {
+        incidentId: resolvedIncidentId,
         reportType,
       },
-    };
+      missingLabel: '보고서 템플릿',
+    });
   },
 });
 
@@ -949,26 +907,13 @@ export const renderDryRunStepperCard = tool({
   }),
   execute: async ({ deploymentId }: { deploymentId: string }) => {
     const resolvedDeploymentId = resolveDeploymentReference(deploymentId);
-    const deployment = getDeployment(resolvedDeploymentId) as Record<string, unknown> | undefined;
-    if (!deployment) {
-      return { error: `배포를 찾을 수 없습니다: ${deploymentId}` };
-    }
-
-    const rollbackPlan = getRollbackPlan(resolvedDeploymentId) as Record<string, unknown> | undefined;
-    if (!rollbackPlan) {
-      return { error: `롤백 계획을 찾을 수 없습니다: ${deploymentId}` };
-    }
-
-    const steps = getRollbackSteps(rollbackPlan['id'] as string) as Array<Record<string, unknown>>;
-
-    return {
-      type: 'a2ui_render' as const,
-      cardType: 'dry_run_stepper',
-      cardData: {
-        rollbackPlan,
-        steps,
+    return await renderBoundTemplate({
+      templateId: 'tpl_dry_run_stepper',
+      args: {
+        deploymentId: resolvedDeploymentId,
       },
-    };
+      missingLabel: 'Dry-run 단계 진행 템플릿',
+    });
   },
 });
 
@@ -982,86 +927,21 @@ export const renderConfirmCard = tool({
     targetId: z.string().describe('작업 대상 ID (배포 ID, Job ID, 또는 인시던트 ID)'),
   }),
   execute: async ({ actionType, targetId }: { actionType: 'rollback' | 'job_execute' | 'incident_close'; targetId: string }) => {
-    let entity: Record<string, unknown> = {};
-    let checks: Array<{ label: string; required: boolean }> = [];
-    const context: Record<string, string> = { targetId, actionType };
+    const resolvedTargetId =
+      actionType === 'rollback'
+        ? resolveDeploymentReference(targetId)
+        : actionType === 'job_execute'
+          ? resolveJobRunReference(targetId)
+          : resolveIncidentReference(targetId);
 
-    if (actionType === 'rollback') {
-      const resolvedTargetId = resolveDeploymentReference(targetId);
-      const deployment = getDeployment(resolvedTargetId) as Record<string, unknown> | undefined;
-      if (!deployment) {
-        return { error: `배포를 찾을 수 없습니다: ${targetId}` };
-      }
-      const rollbackPlan = getRollbackPlan(resolvedTargetId) as Record<string, unknown> | undefined;
-      entity = {
-        id: deployment['id'],
-        version: deployment['version'],
-        service_id: deployment['service_id'],
-        environment: deployment['environment'],
-        previous_version: deployment['previous_version'],
-        plan_status: rollbackPlan?.['status'] ?? '없음',
-      };
-      checks = [
-        { label: 'Dry-run이 성공적으로 완료됨', required: true },
-        { label: 'Release Manager 승인 획득', required: true },
-        { label: '서비스 모니터링 대시보드 확인', required: true },
-        { label: '롤백 후 검증 계획 수립', required: false },
-        { label: '관련 팀에 롤백 사전 공지', required: false },
-      ];
-      context.deploymentId = resolvedTargetId;
-      context.planId = String(rollbackPlan?.['id'] ?? '');
-    } else if (actionType === 'job_execute') {
-      const resolvedTargetId = resolveJobRunReference(targetId);
-      const jobRun = getJobRun(resolvedTargetId) as Record<string, unknown> | undefined;
-      if (!jobRun) {
-        return { error: `Job 실행을 찾을 수 없습니다: ${targetId}` };
-      }
-      entity = {
-        id: jobRun['id'],
-        template_id: jobRun['template_id'],
-        status: jobRun['status'],
-        environment: jobRun['environment'] ?? 'production',
-      };
-      checks = [
-        { label: 'Dry-run 결과 확인 완료', required: true },
-        { label: 'Job spec 파라미터 검증', required: true },
-        { label: '프로덕션 환경 승인 획득', required: true },
-        { label: '실행 중 모니터링 담당자 지정', required: false },
-      ];
-      context.jobRunId = resolvedTargetId;
-    } else {
-      const resolvedTargetId = resolveIncidentReference(targetId);
-      const incident = getIncident(resolvedTargetId) as Record<string, unknown> | undefined;
-      if (!incident) {
-        return { error: `인시던트를 찾을 수 없습니다: ${targetId}` };
-      }
-      entity = {
-        id: incident['id'],
-        title: incident['title'],
-        severity: incident['severity'],
-        service_id: incident['service_id'],
-        status: incident['status'],
-      };
-      checks = [
-        { label: '근본 원인이 식별되고 문서화됨', required: true },
-        { label: '영향받은 서비스 정상 복구 확인', required: true },
-        { label: '재발 방지 조치 계획 수립', required: true },
-        { label: '포스트모템 보고서 작성', required: false },
-        { label: '관련 팀 사후 공유', required: false },
-      ];
-      context.incidentId = resolvedTargetId;
-    }
-
-    return {
-      type: 'a2ui_render' as const,
-      cardType: 'confirm_action',
-      cardData: {
+    return await renderBoundTemplate({
+      templateId: 'tpl_confirm_action',
+      args: {
         actionType,
-        entity,
-        checks,
-        context,
+        targetId: resolvedTargetId,
       },
-    };
+      missingLabel: '실행 확인 템플릿',
+    });
   },
 });
 

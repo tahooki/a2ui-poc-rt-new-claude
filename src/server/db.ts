@@ -310,6 +310,33 @@ function initSchema(db: Database.Database) {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    CREATE TABLE IF NOT EXISTS a2ui_binding_overrides (
+      binding_id TEXT PRIMARY KEY,
+      template_id TEXT NOT NULL REFERENCES a2ui_templates(id),
+      source_id TEXT NOT NULL,
+      slot TEXT NOT NULL,
+      required INTEGER NOT NULL DEFAULT 1,
+      output_key TEXT NOT NULL,
+      input_mapping TEXT NOT NULL DEFAULT '{}',
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS a2ui_source_overrides (
+      source_id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL CHECK(kind IN ('internal_db','internal_api','external_http')),
+      method TEXT,
+      url TEXT,
+      handler_key TEXT,
+      path_params TEXT NOT NULL DEFAULT '{}',
+      query_params TEXT NOT NULL DEFAULT '{}',
+      body_mapping TEXT NOT NULL DEFAULT '{}',
+      result_path TEXT,
+      timeout_ms INTEGER NOT NULL DEFAULT 1500,
+      input_schema TEXT,
+      output_schema TEXT,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     -- Indexes
     CREATE INDEX IF NOT EXISTS idx_incidents_status ON incidents(status);
     CREATE INDEX IF NOT EXISTS idx_incidents_service ON incidents(service_id);
@@ -322,6 +349,7 @@ function initSchema(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_a2ui_decision_inputs_template ON a2ui_template_decision_inputs(template_id);
     CREATE INDEX IF NOT EXISTS idx_a2ui_overrides_template ON a2ui_template_overrides(template_id);
     CREATE INDEX IF NOT EXISTS idx_a2ui_selection_logs_template ON a2ui_template_selection_logs(template_id);
+    CREATE INDEX IF NOT EXISTS idx_a2ui_binding_overrides_template ON a2ui_binding_overrides(template_id);
   `);
 
   // Backward-compatible migration for existing DB files.
@@ -769,6 +797,30 @@ export function getA2UITemplateDecisionInputs(templateId?: string) {
     .all() as Array<Record<string, unknown>>;
 }
 
+export function getA2UIBindingOverrides(templateId?: string) {
+  if (templateId) {
+    return getDb()
+      .prepare('SELECT * FROM a2ui_binding_overrides WHERE template_id = ? ORDER BY binding_id ASC')
+      .all(templateId) as Array<Record<string, unknown>>;
+  }
+
+  return getDb()
+    .prepare('SELECT * FROM a2ui_binding_overrides ORDER BY template_id ASC, binding_id ASC')
+    .all() as Array<Record<string, unknown>>;
+}
+
+export function getA2UIDataSourceOverrides(sourceId?: string) {
+  if (sourceId) {
+    return getDb()
+      .prepare('SELECT * FROM a2ui_source_overrides WHERE source_id = ?')
+      .all(sourceId) as Array<Record<string, unknown>>;
+  }
+
+  return getDb()
+    .prepare('SELECT * FROM a2ui_source_overrides ORDER BY source_id ASC')
+    .all() as Array<Record<string, unknown>>;
+}
+
 export function updateA2UITemplateEnabled(id: string, enabled: boolean) {
   getDb()
     .prepare("UPDATE a2ui_templates SET is_enabled = ?, updated_at = datetime('now') WHERE id = ?")
@@ -873,6 +925,99 @@ export function replaceA2UITemplateDecisionInputs(
   })();
 }
 
+export function replaceA2UITemplateBindingOverrides(
+  templateId: string,
+  bindings: Array<{
+    binding_id: string;
+    source_id: string;
+    slot: string;
+    required: boolean;
+    output_key: string;
+    input_mapping: Record<string, string>;
+  }>,
+) {
+  const db = getDb();
+  const deleteStmt = db.prepare(
+    'DELETE FROM a2ui_binding_overrides WHERE template_id = ?',
+  );
+  const insertStmt = db.prepare(
+    `INSERT INTO a2ui_binding_overrides
+      (binding_id, template_id, source_id, slot, required, output_key, input_mapping, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
+  );
+
+  db.transaction(() => {
+    deleteStmt.run(templateId);
+    bindings.forEach((binding) => {
+      insertStmt.run(
+        binding.binding_id,
+        templateId,
+        binding.source_id,
+        binding.slot,
+        binding.required ? 1 : 0,
+        binding.output_key,
+        JSON.stringify(binding.input_mapping ?? {}),
+      );
+    });
+  })();
+}
+
+export function upsertA2UIDataSourceOverrides(
+  sources: Array<{
+    source_id: string;
+    kind: string;
+    method?: string | null;
+    url?: string | null;
+    handler_key?: string | null;
+    path_params?: Record<string, string>;
+    query_params?: Record<string, string>;
+    body_mapping?: Record<string, string>;
+    result_path?: string | null;
+    timeout_ms?: number;
+    input_schema?: Record<string, unknown> | null;
+    output_schema?: Record<string, unknown> | null;
+  }>,
+) {
+  const stmt = getDb().prepare(
+    `INSERT INTO a2ui_source_overrides
+      (source_id, kind, method, url, handler_key, path_params, query_params, body_mapping, result_path, timeout_ms, input_schema, output_schema, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+     ON CONFLICT(source_id) DO UPDATE SET
+      kind = excluded.kind,
+      method = excluded.method,
+      url = excluded.url,
+      handler_key = excluded.handler_key,
+      path_params = excluded.path_params,
+      query_params = excluded.query_params,
+      body_mapping = excluded.body_mapping,
+      result_path = excluded.result_path,
+      timeout_ms = excluded.timeout_ms,
+      input_schema = excluded.input_schema,
+      output_schema = excluded.output_schema,
+      updated_at = datetime('now')`,
+  );
+
+  const db = getDb();
+  db.transaction(() => {
+    sources.forEach((source) => {
+      stmt.run(
+        source.source_id,
+        source.kind,
+        source.method ?? null,
+        source.url ?? null,
+        source.handler_key ?? null,
+        JSON.stringify(source.path_params ?? {}),
+        JSON.stringify(source.query_params ?? {}),
+        JSON.stringify(source.body_mapping ?? {}),
+        source.result_path ?? null,
+        source.timeout_ms ?? 1500,
+        source.input_schema ? JSON.stringify(source.input_schema) : null,
+        source.output_schema ? JSON.stringify(source.output_schema) : null,
+      );
+    });
+  })();
+}
+
 export function logA2UITemplateSelection(input: {
   templateId?: string | null;
   threadId?: string | null;
@@ -902,6 +1047,55 @@ export function logA2UITemplateSelection(input: {
       input.decisionPayload ? JSON.stringify(input.decisionPayload) : null,
       input.status,
     );
+}
+
+export function getA2UITemplateSelectionLogs(input: {
+  templateId?: string;
+  page?: string;
+  limit?: number;
+}) {
+  const limit = input.limit ?? 20;
+
+  if (input.templateId && input.page) {
+    return getDb()
+      .prepare(
+        `SELECT * FROM a2ui_template_selection_logs
+         WHERE template_id = ? AND page = ?
+         ORDER BY created_at DESC
+         LIMIT ?`,
+      )
+      .all(input.templateId, input.page, limit) as Array<Record<string, unknown>>;
+  }
+
+  if (input.templateId) {
+    return getDb()
+      .prepare(
+        `SELECT * FROM a2ui_template_selection_logs
+         WHERE template_id = ?
+         ORDER BY created_at DESC
+         LIMIT ?`,
+      )
+      .all(input.templateId, limit) as Array<Record<string, unknown>>;
+  }
+
+  if (input.page) {
+    return getDb()
+      .prepare(
+        `SELECT * FROM a2ui_template_selection_logs
+         WHERE page = ?
+         ORDER BY created_at DESC
+         LIMIT ?`,
+      )
+      .all(input.page, limit) as Array<Record<string, unknown>>;
+  }
+
+  return getDb()
+    .prepare(
+      `SELECT * FROM a2ui_template_selection_logs
+       ORDER BY created_at DESC
+       LIMIT ?`,
+    )
+    .all(limit) as Array<Record<string, unknown>>;
 }
 
 // ─── Chat helpers ───
