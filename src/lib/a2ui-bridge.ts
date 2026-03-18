@@ -163,10 +163,20 @@ export function buildRollbackSummaryCard(
   deployment: Record<string, unknown>,
   riskChecks: Array<Record<string, unknown>>,
   rollbackPlan: Record<string, unknown> | null,
+  context?: {
+    relatedIncidents?: Array<Record<string, unknown>>;
+    deploymentDiffs?: Array<Record<string, unknown>>;
+    recentAuditLogs?: Array<Record<string, unknown>>;
+    approvalStatus?: Record<string, unknown> | null;
+  },
 ): A2UICardDef {
   const deploymentId = String(deployment['id'] ?? '');
   const planId = String(rollbackPlan?.['id'] ?? '');
   const planStatus = rollbackPlan?.['status'] as string | undefined;
+  const relatedIncidents = context?.relatedIncidents ?? [];
+  const deploymentDiffs = context?.deploymentDiffs ?? [];
+  const recentAuditLogs = context?.recentAuditLogs ?? [];
+  const approvalStatus = context?.approvalStatus ?? null;
 
   // ── Tab 1: 배포 정보 ──
   const deployInfoComponents: A2UIComponent[] = [
@@ -306,6 +316,86 @@ export function buildRollbackSummaryCard(
     mkCol('plan_col', ['plan_title', 'plan_div_1', 'plan_st_row', 'plan_tv_row', 'plan_div_2', 'plan_btn_row']),
   );
 
+  // ── Tab 4: 운영 문맥 ──
+  const contextComponents: A2UIComponent[] = [
+    mkText('ctx_title', '운영 문맥', 'h3'),
+    mkDivider('ctx_div_1'),
+  ];
+  const contextRowIds: string[] = ['ctx_title', 'ctx_div_1'];
+
+  const approvalStatusText = statusLabel(String(approvalStatus?.['status'] ?? 'draft'));
+  const approvalMessage = String(approvalStatus?.['message'] ?? '승인 상태 정보 없음');
+  contextComponents.push(
+    mkIcon('ctx_appr_icon', statusIcon(String(approvalStatus?.['status'] ?? 'draft'))),
+    mkText('ctx_appr_label', '승인 상태'),
+    mkText('ctx_appr_val', approvalStatusText),
+    mkRow('ctx_appr_row', ['ctx_appr_icon', 'ctx_appr_label', 'ctx_appr_val'], 'spaceBetween'),
+    mkText('ctx_appr_msg', approvalMessage, 'caption'),
+  );
+  contextRowIds.push('ctx_appr_row', 'ctx_appr_msg');
+
+  const diffSummary = {
+    added: deploymentDiffs.filter((diff) => String(diff['change_type'] ?? '') === 'added').length,
+    modified: deploymentDiffs.filter((diff) => String(diff['change_type'] ?? '') === 'modified').length,
+    deleted: deploymentDiffs.filter((diff) => String(diff['change_type'] ?? '') === 'deleted').length,
+  };
+  contextComponents.push(
+    mkDivider('ctx_div_2'),
+    mkText('ctx_diff_title', `변경 요약 (${deploymentDiffs.length}개)`, 'h4'),
+    mkText(
+      'ctx_diff_summary',
+      `추가 ${diffSummary.added} / 수정 ${diffSummary.modified} / 삭제 ${diffSummary.deleted}`,
+      'caption',
+    ),
+  );
+  contextRowIds.push('ctx_div_2', 'ctx_diff_title', 'ctx_diff_summary');
+
+  if (relatedIncidents.length > 0) {
+    contextComponents.push(
+      mkDivider('ctx_div_3'),
+      mkText('ctx_inc_title', `관련 인시던트 (${relatedIncidents.length})`, 'h4'),
+    );
+    contextRowIds.push('ctx_div_3', 'ctx_inc_title');
+
+    relatedIncidents.slice(0, 3).forEach((incident, index) => {
+      const rowId = `ctx_inc_row_${index}`;
+      const iconId = `ctx_inc_icon_${index}`;
+      const textId = `ctx_inc_text_${index}`;
+      const label = `${String(incident['title'] ?? incident['id'] ?? 'incident')} · ${statusLabel(String(incident['status'] ?? 'open'))}`;
+      contextComponents.push(
+        mkIcon(iconId, statusIcon(String(incident['status'] ?? 'open'))),
+        mkText(textId, label, 'caption'),
+        mkRow(rowId, [iconId, textId], 'start'),
+      );
+      contextRowIds.push(rowId);
+    });
+  }
+
+  if (recentAuditLogs.length > 0) {
+    contextComponents.push(
+      mkDivider('ctx_div_4'),
+      mkText('ctx_audit_title', `최근 감사 이력 (${recentAuditLogs.length})`, 'h4'),
+    );
+    contextRowIds.push('ctx_div_4', 'ctx_audit_title');
+
+    recentAuditLogs.slice(0, 3).forEach((log, index) => {
+      const rowId = `ctx_audit_row_${index}`;
+      const iconId = `ctx_audit_icon_${index}`;
+      const textId = `ctx_audit_text_${index}`;
+      const text = `${String(log['action_type'] ?? 'action')} · ${String(log['result'] ?? 'unknown')}`;
+      contextComponents.push(
+        mkIcon(iconId, statusIcon(String(log['result'] ?? 'unknown'))),
+        mkText(textId, text, 'caption'),
+        mkRow(rowId, [iconId, textId], 'start'),
+      );
+      contextRowIds.push(rowId);
+    });
+  }
+
+  contextComponents.push(
+    mkCol('ctx_col', contextRowIds),
+  );
+
   // ── Root with Tabs ──
   const components: A2UIComponent[] = [
     mkText('card_title', '롤백 판단 요약', 'h2'),
@@ -313,10 +403,12 @@ export function buildRollbackSummaryCard(
     ...deployInfoComponents,
     ...riskComponents,
     ...planComponents,
+    ...contextComponents,
     mkTabs('main_tabs', [
       { title: '배포 정보', childId: 'dep_info_col' },
       { title: `리스크 (${riskChecks.length})`, childId: 'risk_col' },
       { title: '롤백 계획', childId: 'plan_col' },
+      { title: '운영 문맥', childId: 'ctx_col' },
     ]),
     mkCol('main_col', ['card_title', 'card_div_top', 'main_tabs']),
     mkCard('root_card', 'main_col'),
@@ -351,7 +443,21 @@ export function buildRollbackSummaryCard(
 export function buildEvidenceComparisonCard(
   incident: Record<string, unknown>,
   evidence: Array<Record<string, unknown>>,
+  context?: {
+    incidentEvents?: Array<Record<string, unknown>>;
+    linkedDeployment?: Record<string, unknown> | null;
+    linkedDeploymentDiffs?: Array<Record<string, unknown>>;
+    recentAuditLogs?: Array<Record<string, unknown>>;
+    rootCauseHints?: string[];
+    nextActions?: string[];
+  },
 ): A2UICardDef {
+  const incidentEvents = context?.incidentEvents ?? [];
+  const linkedDeployment = context?.linkedDeployment ?? null;
+  const linkedDeploymentDiffs = context?.linkedDeploymentDiffs ?? [];
+  const recentAuditLogs = context?.recentAuditLogs ?? [];
+  const rootCauseHints = context?.rootCauseHints ?? [];
+  const nextActions = context?.nextActions ?? [];
   // Group evidence by type
   const byType: Record<string, Array<Record<string, unknown>>> = {};
   for (const ev of evidence) {
@@ -502,15 +608,112 @@ export function buildEvidenceComparisonCard(
     findingsComponents.push(mkCol('findings_col', ['findings_header', ...findingRowIds]));
   }
 
+  const triageComponents: A2UIComponent[] = [];
+  const triageChildren: string[] = [];
+
+  if (incidentEvents.length > 0) {
+    triageComponents.push(
+      mkDivider('triage_div_1'),
+      mkText('triage_events_title', `최근 이벤트 (${incidentEvents.length})`, 'h4'),
+    );
+    triageChildren.push('triage_div_1', 'triage_events_title');
+
+    incidentEvents.slice(0, 3).forEach((event, index) => {
+      const rowId = `triage_event_row_${index}`;
+      const iconId = `triage_event_icon_${index}`;
+      const textId = `triage_event_text_${index}`;
+      const text = `${String(event['action'] ?? 'event')} · ${String(event['detail'] ?? '').slice(0, 48)}`;
+      triageComponents.push(
+        mkIcon(iconId, statusIcon(index === incidentEvents.length - 1 ? 'open' : 'running')),
+        mkText(textId, text || '-', 'caption'),
+        mkRow(rowId, [iconId, textId], 'start'),
+      );
+      triageChildren.push(rowId);
+    });
+  }
+
+  if (linkedDeployment) {
+    const diffSummary = {
+      added: linkedDeploymentDiffs.filter((diff) => String(diff['change_type'] ?? '') === 'added').length,
+      modified: linkedDeploymentDiffs.filter((diff) => String(diff['change_type'] ?? '') === 'modified').length,
+      deleted: linkedDeploymentDiffs.filter((diff) => String(diff['change_type'] ?? '') === 'deleted').length,
+    };
+    triageComponents.push(
+      mkDivider('triage_div_2'),
+      mkText('triage_dep_title', '연결된 배포 문맥', 'h4'),
+      mkText(
+        'triage_dep_text',
+        `${String(linkedDeployment['version'] ?? linkedDeployment['id'] ?? 'deployment')} · 변경 추가 ${diffSummary.added} / 수정 ${diffSummary.modified} / 삭제 ${diffSummary.deleted}`,
+        'caption',
+      ),
+    );
+    triageChildren.push('triage_div_2', 'triage_dep_title', 'triage_dep_text');
+  }
+
+  if (rootCauseHints.length > 0) {
+    triageComponents.push(
+      mkDivider('triage_div_3'),
+      mkText('triage_hint_title', '원인 힌트', 'h4'),
+    );
+    triageChildren.push('triage_div_3', 'triage_hint_title');
+
+    rootCauseHints.slice(0, 3).forEach((hint, index) => {
+      const id = `triage_hint_${index}`;
+      triageComponents.push(mkText(id, `• ${hint}`, 'caption'));
+      triageChildren.push(id);
+    });
+  }
+
+  if (nextActions.length > 0) {
+    triageComponents.push(
+      mkDivider('triage_div_4'),
+      mkText('triage_next_title', '다음 액션 제안', 'h4'),
+    );
+    triageChildren.push('triage_div_4', 'triage_next_title');
+
+    nextActions.slice(0, 3).forEach((action, index) => {
+      const id = `triage_next_${index}`;
+      triageComponents.push(mkText(id, `• ${action}`, 'caption'));
+      triageChildren.push(id);
+    });
+  }
+
+  if (recentAuditLogs.length > 0) {
+    triageComponents.push(
+      mkDivider('triage_div_5'),
+      mkText('triage_audit_title', `최근 감사 로그 (${recentAuditLogs.length})`, 'h4'),
+    );
+    triageChildren.push('triage_div_5', 'triage_audit_title');
+
+    recentAuditLogs.slice(0, 3).forEach((log, index) => {
+      const rowId = `triage_audit_row_${index}`;
+      const iconId = `triage_audit_icon_${index}`;
+      const textId = `triage_audit_text_${index}`;
+      const text = `${String(log['action_type'] ?? 'action')} · ${String(log['result'] ?? 'unknown')}`;
+      triageComponents.push(
+        mkIcon(iconId, statusIcon(String(log['result'] ?? 'unknown'))),
+        mkText(textId, text, 'caption'),
+        mkRow(rowId, [iconId, textId], 'start'),
+      );
+      triageChildren.push(rowId);
+    });
+  }
+
+  if (triageChildren.length > 0) {
+    triageComponents.push(mkCol('triage_col', triageChildren));
+  }
+
   const mainColChildren = [
     'inc_title', 'inc_div_top', 'inc_summary_col', 'inc_div_bottom', 'ev_tabs',
     ...(keyFindings.length > 0 ? ['findings_div', 'findings_col'] : []),
+    ...(triageChildren.length > 0 ? ['triage_col'] : []),
   ];
 
   const components: A2UIComponent[] = [
     ...incidentComponents,
     ...evidenceComponents,
     ...findingsComponents,
+    ...triageComponents,
     mkCol('main_col', mainColChildren),
     mkCard('root_card', 'main_col'),
   ];
@@ -534,13 +737,21 @@ export function buildEvidenceComparisonCard(
 export function buildDryRunStepperCard(
   rollbackPlan: Record<string, unknown>,
   steps: Array<Record<string, unknown>>,
+  context?: {
+    deployment?: Record<string, unknown> | null;
+    riskChecks?: Array<Record<string, unknown>>;
+    dryRunSummary?: Record<string, unknown> | null;
+  },
 ): A2UICardDef {
   const planId = String(rollbackPlan['id'] ?? '');
   const deploymentId = String(rollbackPlan['deployment_id'] ?? '');
   const currentStepOrder = steps.find((s) => s['status'] === 'pending')?.['step_order'] as number | undefined;
+  const deployment = context?.deployment ?? null;
+  const riskChecks = context?.riskChecks ?? [];
+  const dryRunSummary = context?.dryRunSummary ?? null;
 
   // Completed count
-  const completedCount = steps.filter((s) => s['status'] === 'completed').length;
+  const completedCount = steps.filter((s) => ['completed', 'done'].includes(String(s['status'] ?? ''))).length;
   const totalSteps = steps.length;
   const progressText = `${completedCount} / ${totalSteps} 단계 완료`;
 
@@ -554,6 +765,28 @@ export function buildDryRunStepperCard(
     mkText('stepper_plan_id', `계획: ${planId}`, 'caption'),
     mkDivider('stepper_div_1'),
   ];
+
+  if (deployment || riskChecks.length > 0 || dryRunSummary) {
+    const passCount = riskChecks.filter((item) => String(item['status'] ?? '') === 'pass').length;
+    const warnCount = riskChecks.filter((item) => String(item['status'] ?? '') === 'warn').length;
+    const failCount = riskChecks.filter((item) => String(item['status'] ?? '') === 'fail').length;
+    headerComponents.push(
+      mkText(
+        'stepper_context',
+        `${deployment ? `배포 ${String(deployment['version'] ?? deployment['id'] ?? '')}` : '배포 정보 없음'} · 리스크 통과 ${passCount} / 경고 ${warnCount} / 실패 ${failCount}`,
+        'caption',
+      ),
+    );
+    if (dryRunSummary) {
+      headerComponents.push(
+        mkText(
+          'stepper_dryrun_summary',
+          `Dry-run 요약: ${String(dryRunSummary['message'] ?? dryRunSummary['result'] ?? '확인 필요')}`,
+          'caption',
+        ),
+      );
+    }
+  }
 
   // Step rows
   const stepComponents: A2UIComponent[] = [];
@@ -648,7 +881,17 @@ export function buildConfirmActionCard(
   entity: Record<string, unknown>,
   checks: Array<{ label: string; required: boolean }>,
   context: Record<string, string>,
+  extra?: {
+    recentAuditLogs?: Array<Record<string, unknown>>;
+    recentRelatedEvents?: Array<Record<string, unknown>>;
+    approvalStatus?: Record<string, unknown> | null;
+    policyHints?: string[];
+  },
 ): A2UICardDef {
+  const recentAuditLogs = extra?.recentAuditLogs ?? [];
+  const recentRelatedEvents = extra?.recentRelatedEvents ?? [];
+  const approvalStatus = extra?.approvalStatus ?? null;
+  const policyHints = extra?.policyHints ?? [];
   const actionLabels: Record<string, string> = {
     rollback: '롤백 실행 확인',
     job_execute: 'Job 실행 확인',
@@ -720,6 +963,52 @@ export function buildConfirmActionCard(
 
   checklistComponents.push(mkCol('check_col', checkIds));
 
+  const contextComponents: A2UIComponent[] = [];
+  const contextIds: string[] = [];
+
+  if (approvalStatus || policyHints.length > 0 || recentAuditLogs.length > 0 || recentRelatedEvents.length > 0) {
+    contextComponents.push(
+      mkDivider('confirm_ctx_div'),
+      mkText('confirm_ctx_title', '정책 및 최근 문맥', 'h3'),
+    );
+    contextIds.push('confirm_ctx_div', 'confirm_ctx_title');
+  }
+
+  if (approvalStatus) {
+    contextComponents.push(
+      mkText(
+        'confirm_ctx_approval',
+        `승인 상태: ${statusLabel(String(approvalStatus['status'] ?? 'draft'))}`,
+        'caption',
+      ),
+    );
+    contextIds.push('confirm_ctx_approval');
+  }
+
+  policyHints.slice(0, 3).forEach((hint, index) => {
+    const id = `confirm_ctx_hint_${index}`;
+    contextComponents.push(mkText(id, `• ${hint}`, 'caption'));
+    contextIds.push(id);
+  });
+
+  recentRelatedEvents.slice(0, 2).forEach((event, index) => {
+    const id = `confirm_ctx_event_${index}`;
+    const text = String(event['action'] ?? event['detail'] ?? event['type'] ?? 'event');
+    contextComponents.push(mkText(id, `최근 이벤트: ${text}`, 'caption'));
+    contextIds.push(id);
+  });
+
+  recentAuditLogs.slice(0, 2).forEach((log, index) => {
+    const id = `confirm_ctx_audit_${index}`;
+    const text = `${String(log['action_type'] ?? 'action')} · ${String(log['result'] ?? 'unknown')}`;
+    contextComponents.push(mkText(id, `감사 로그: ${text}`, 'caption'));
+    contextIds.push(id);
+  });
+
+  if (contextIds.length > 0) {
+    contextComponents.push(mkCol('confirm_ctx_col', contextIds));
+  }
+
   // Action buttons
   const buttonComponents: A2UIComponent[] = [
     mkDivider('confirm_div_bottom'),
@@ -733,6 +1022,7 @@ export function buildConfirmActionCard(
   const mainChildren = [
     'confirm_header', 'confirm_div_top', 'confirm_desc', 'confirm_div_1',
     'entity_col', 'check_div', 'check_col',
+    ...(contextIds.length > 0 ? ['confirm_ctx_col'] : []),
     'confirm_div_bottom', 'confirm_btn_row',
   ];
 
@@ -740,6 +1030,7 @@ export function buildConfirmActionCard(
     ...headerComponents,
     ...entityComponents,
     ...checklistComponents,
+    ...contextComponents,
     ...buttonComponents,
     mkCol('main_col', mainChildren),
     mkCard('root_card', 'main_col'),
@@ -761,7 +1052,15 @@ export function buildJobSpecReviewCard(
   jobRun: Record<string, unknown>,
   template: Record<string, unknown> | null,
   dryRunResult: Record<string, unknown> | null,
+  context?: {
+    jobRunEvents?: Array<Record<string, unknown>>;
+    dependencySummary?: Record<string, unknown> | null;
+    rerunHints?: string[];
+  },
 ): A2UICardDef {
+  const jobRunEvents = context?.jobRunEvents ?? [];
+  const dependencySummary = context?.dependencySummary ?? null;
+  const rerunHints = context?.rerunHints ?? [];
   const spec = jobRun['specParsed'] as Record<string, unknown> | null;
   const specParams = spec ? Object.entries(spec).slice(0, 8) : [];
   const jobRunId = String(jobRun['id'] ?? '');
@@ -868,6 +1167,45 @@ export function buildJobSpecReviewCard(
     tabDefs.push({ title: 'Dry-Run', childId: 'dryrun_col' });
   }
 
+  const contextComponents: A2UIComponent[] = [];
+  const contextIds: string[] = [];
+  if (dependencySummary || jobRunEvents.length > 0 || rerunHints.length > 0) {
+    contextComponents.push(
+      mkDivider('job_ctx_div'),
+      mkText('job_ctx_title', '실행 문맥', 'h3'),
+    );
+    contextIds.push('job_ctx_div', 'job_ctx_title');
+  }
+
+  if (dependencySummary) {
+    contextComponents.push(
+      mkText(
+        'job_ctx_dep',
+        `의존성 ${String(dependencySummary['dependencyCount'] ?? 0)}개 · ${String(dependencySummary['readiness'] ?? '확인 필요')}`,
+        'caption',
+      ),
+    );
+    contextIds.push('job_ctx_dep');
+  }
+
+  jobRunEvents.slice(0, 3).forEach((event, index) => {
+    const id = `job_ctx_event_${index}`;
+    const text = `${String(event['type'] ?? 'event')} · ${String(event['detail'] ?? '').slice(0, 48)}`;
+    contextComponents.push(mkText(id, text, 'caption'));
+    contextIds.push(id);
+  });
+
+  rerunHints.slice(0, 3).forEach((hint, index) => {
+    const id = `job_ctx_hint_${index}`;
+    contextComponents.push(mkText(id, `• ${hint}`, 'caption'));
+    contextIds.push(id);
+  });
+
+  if (contextIds.length > 0) {
+    contextComponents.push(mkCol('job_ctx_col', contextIds));
+    tabDefs.push({ title: '문맥', childId: 'job_ctx_col' });
+  }
+
   // ── Action buttons ──
   const buttonComponents: A2UIComponent[] = [];
   const buttonIds: string[] = [];
@@ -916,6 +1254,7 @@ export function buildJobSpecReviewCard(
     ...infoComponents,
     ...specComponents,
     ...dryRunComponents,
+    ...contextComponents,
     mkTabs('main_tabs', tabDefs),
     ...buttonComponents,
     ...(buttonIds.length > 0 ? [
@@ -979,7 +1318,17 @@ const REPORT_SECTIONS: Record<string, Array<{ title: string; description: string
 export function buildReportTemplateCard(
   incident: Record<string, unknown>,
   reportType: string,
+  context?: {
+    incidentEvents?: Array<Record<string, unknown>>;
+    evidenceSummary?: Record<string, unknown> | null;
+    recentAuditLogs?: Array<Record<string, unknown>>;
+    pendingActions?: string[];
+  },
 ): A2UICardDef {
+  const incidentEvents = context?.incidentEvents ?? [];
+  const evidenceSummary = context?.evidenceSummary ?? null;
+  const recentAuditLogs = context?.recentAuditLogs ?? [];
+  const pendingActions = context?.pendingActions ?? [];
   const sections = REPORT_SECTIONS[reportType] ?? REPORT_SECTIONS['default'];
   const incidentId = String(incident['id'] ?? '');
   const reportTypeLabels: Record<string, string> = {
@@ -1043,6 +1392,51 @@ export function buildReportTemplateCard(
     mkCol('action_items_col', ['action_header', 'action_item_1', 'action_item_2', 'action_item_3']),
   ];
 
+  const contextComponents: A2UIComponent[] = [];
+  const contextIds: string[] = [];
+  if (incidentEvents.length > 0 || evidenceSummary || recentAuditLogs.length > 0 || pendingActions.length > 0) {
+    contextComponents.push(
+      mkDivider('report_ctx_div'),
+      mkText('report_ctx_title', '현재 문맥 요약', 'h3'),
+    );
+    contextIds.push('report_ctx_div', 'report_ctx_title');
+  }
+
+  if (evidenceSummary) {
+    contextComponents.push(
+      mkText(
+        'report_ctx_evidence',
+        `증거 ${String(evidenceSummary['total'] ?? 0)}건 수집됨`,
+        'caption',
+      ),
+    );
+    contextIds.push('report_ctx_evidence');
+  }
+
+  incidentEvents.slice(0, 2).forEach((event, index) => {
+    const id = `report_ctx_event_${index}`;
+    const text = `${String(event['action'] ?? 'event')} · ${String(event['detail'] ?? '').slice(0, 48)}`;
+    contextComponents.push(mkText(id, text, 'caption'));
+    contextIds.push(id);
+  });
+
+  recentAuditLogs.slice(0, 2).forEach((log, index) => {
+    const id = `report_ctx_audit_${index}`;
+    const text = `${String(log['action_type'] ?? 'action')} · ${String(log['result'] ?? 'unknown')}`;
+    contextComponents.push(mkText(id, `감사 로그: ${text}`, 'caption'));
+    contextIds.push(id);
+  });
+
+  pendingActions.slice(0, 3).forEach((action, index) => {
+    const id = `report_ctx_action_${index}`;
+    contextComponents.push(mkText(id, `• ${action}`, 'caption'));
+    contextIds.push(id);
+  });
+
+  if (contextIds.length > 0) {
+    contextComponents.push(mkCol('report_ctx_col', contextIds));
+  }
+
   // Buttons
   const buttonComponents: A2UIComponent[] = [
     mkDivider('btn_div'),
@@ -1059,6 +1453,7 @@ export function buildReportTemplateCard(
     'report_type_row', 'report_inc_row', 'report_div_1',
     'sections_list',
     'action_div', 'action_items_col',
+    ...(contextIds.length > 0 ? ['report_ctx_col'] : []),
     'btn_div', 'btn_row',
   ];
 
@@ -1066,6 +1461,7 @@ export function buildReportTemplateCard(
     ...headerComponents,
     ...sectionComponents,
     ...actionItemComponents,
+    ...contextComponents,
     ...buttonComponents,
     mkCol('main_col', mainChildren),
     mkCard('root_card', 'main_col'),

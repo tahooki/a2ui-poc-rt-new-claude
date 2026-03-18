@@ -17,6 +17,10 @@ export const TEMPLATE_DEFINITIONS: A2UITemplateDef[] = [
     ],
     optionalBindings: [
       "tpl_rollback_summary.rollbackPlan",
+      "tpl_rollback_summary.relatedIncidents",
+      "tpl_rollback_summary.deploymentDiffs",
+      "tpl_rollback_summary.recentAuditLogs",
+      "tpl_rollback_summary.approvalStatus",
     ],
     fallbackPolicy: { mode: "text_fallback" },
   },
@@ -29,7 +33,14 @@ export const TEMPLATE_DEFINITIONS: A2UITemplateDef[] = [
       "tpl_evidence_comparison.incident",
       "tpl_evidence_comparison.evidence",
     ],
-    optionalBindings: [],
+    optionalBindings: [
+      "tpl_evidence_comparison.incidentEvents",
+      "tpl_evidence_comparison.linkedDeployment",
+      "tpl_evidence_comparison.linkedDeploymentDiffs",
+      "tpl_evidence_comparison.recentAuditLogs",
+      "tpl_evidence_comparison.rootCauseHints",
+      "tpl_evidence_comparison.nextActions",
+    ],
     fallbackPolicy: { mode: "text_fallback" },
   },
   {
@@ -41,7 +52,11 @@ export const TEMPLATE_DEFINITIONS: A2UITemplateDef[] = [
       "tpl_dry_run_stepper.rollbackPlan",
       "tpl_dry_run_stepper.steps",
     ],
-    optionalBindings: [],
+    optionalBindings: [
+      "tpl_dry_run_stepper.deployment",
+      "tpl_dry_run_stepper.riskChecks",
+      "tpl_dry_run_stepper.dryRunSummary",
+    ],
     fallbackPolicy: {
       mode: "fallback_template",
       fallbackTemplateId: "tpl_rollback_summary",
@@ -58,7 +73,12 @@ export const TEMPLATE_DEFINITIONS: A2UITemplateDef[] = [
       "tpl_confirm_action.checks",
       "tpl_confirm_action.context",
     ],
-    optionalBindings: [],
+    optionalBindings: [
+      "tpl_confirm_action.recentAuditLogs",
+      "tpl_confirm_action.recentRelatedEvents",
+      "tpl_confirm_action.approvalStatus",
+      "tpl_confirm_action.policyHints",
+    ],
     fallbackPolicy: { mode: "text_fallback" },
   },
   {
@@ -72,6 +92,9 @@ export const TEMPLATE_DEFINITIONS: A2UITemplateDef[] = [
     optionalBindings: [
       "tpl_job_spec_review.template",
       "tpl_job_spec_review.dryRunResult",
+      "tpl_job_spec_review.jobRunEvents",
+      "tpl_job_spec_review.dependencySummary",
+      "tpl_job_spec_review.rerunHints",
     ],
     fallbackPolicy: { mode: "text_fallback" },
   },
@@ -84,7 +107,12 @@ export const TEMPLATE_DEFINITIONS: A2UITemplateDef[] = [
       "tpl_report_template.incident",
       "tpl_report_template.reportType",
     ],
-    optionalBindings: [],
+    optionalBindings: [
+      "tpl_report_template.incidentEvents",
+      "tpl_report_template.evidenceSummary",
+      "tpl_report_template.recentAuditLogs",
+      "tpl_report_template.pendingActions",
+    ],
     fallbackPolicy: { mode: "text_fallback" },
   },
 ];

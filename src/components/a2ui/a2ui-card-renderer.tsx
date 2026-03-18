@@ -84,35 +84,89 @@ function buildCardDef(
       const deployment = (cardData["deployment"] as Record<string, unknown>) ?? {};
       const riskChecks = (cardData["riskChecks"] as Array<Record<string, unknown>>) ?? [];
       const rollbackPlan = (cardData["rollbackPlan"] as Record<string, unknown>) ?? null;
-      return buildRollbackSummaryCard(deployment, riskChecks, rollbackPlan);
+      return buildRollbackSummaryCard(deployment, riskChecks, rollbackPlan, {
+        relatedIncidents:
+          (cardData["relatedIncidents"] as Array<Record<string, unknown>>) ?? [],
+        deploymentDiffs:
+          (cardData["deploymentDiffs"] as Array<Record<string, unknown>>) ?? [],
+        recentAuditLogs:
+          (cardData["recentAuditLogs"] as Array<Record<string, unknown>>) ?? [],
+        approvalStatus:
+          (cardData["approvalStatus"] as Record<string, unknown>) ?? null,
+      });
     }
     case "evidence_comparison": {
       const incident = (cardData["incident"] as Record<string, unknown>) ?? {};
       const evidence = (cardData["evidence"] as Array<Record<string, unknown>>) ?? [];
-      return buildEvidenceComparisonCard(incident, evidence);
+      return buildEvidenceComparisonCard(incident, evidence, {
+        incidentEvents:
+          (cardData["incidentEvents"] as Array<Record<string, unknown>>) ?? [],
+        linkedDeployment:
+          (cardData["linkedDeployment"] as Record<string, unknown>) ?? null,
+        linkedDeploymentDiffs:
+          (cardData["linkedDeploymentDiffs"] as Array<Record<string, unknown>>) ?? [],
+        recentAuditLogs:
+          (cardData["recentAuditLogs"] as Array<Record<string, unknown>>) ?? [],
+        rootCauseHints:
+          (cardData["rootCauseHints"] as string[]) ?? [],
+        nextActions:
+          (cardData["nextActions"] as string[]) ?? [],
+      });
     }
     case "dry_run_stepper": {
       const rollbackPlan = (cardData["rollbackPlan"] as Record<string, unknown>) ?? {};
       const steps = (cardData["steps"] as Array<Record<string, unknown>>) ?? [];
-      return buildDryRunStepperCard(rollbackPlan, steps);
+      return buildDryRunStepperCard(rollbackPlan, steps, {
+        deployment:
+          (cardData["deployment"] as Record<string, unknown>) ?? null,
+        riskChecks:
+          (cardData["riskChecks"] as Array<Record<string, unknown>>) ?? [],
+        dryRunSummary:
+          (cardData["dryRunSummary"] as Record<string, unknown>) ?? null,
+      });
     }
     case "confirm_action": {
       const actionType = (cardData["actionType"] as "rollback" | "job_execute" | "incident_close") ?? "rollback";
       const entity = (cardData["entity"] as Record<string, unknown>) ?? {};
       const checks = (cardData["checks"] as Array<{ label: string; required: boolean }>) ?? [];
       const context = (cardData["context"] as Record<string, string>) ?? {};
-      return buildConfirmActionCard(actionType, entity, checks, context);
+      return buildConfirmActionCard(actionType, entity, checks, context, {
+        recentAuditLogs:
+          (cardData["recentAuditLogs"] as Array<Record<string, unknown>>) ?? [],
+        recentRelatedEvents:
+          (cardData["recentRelatedEvents"] as Array<Record<string, unknown>>) ?? [],
+        approvalStatus:
+          (cardData["approvalStatus"] as Record<string, unknown>) ?? null,
+        policyHints:
+          (cardData["policyHints"] as string[]) ?? [],
+      });
     }
     case "job_spec_review": {
       const jobRun = (cardData["jobRun"] as Record<string, unknown>) ?? {};
       const template = (cardData["template"] as Record<string, unknown>) ?? null;
       const dryRunResult = (cardData["dryRunResult"] as Record<string, unknown>) ?? null;
-      return buildJobSpecReviewCard(jobRun, template, dryRunResult);
+      return buildJobSpecReviewCard(jobRun, template, dryRunResult, {
+        jobRunEvents:
+          (cardData["jobRunEvents"] as Array<Record<string, unknown>>) ?? [],
+        dependencySummary:
+          (cardData["dependencySummary"] as Record<string, unknown>) ?? null,
+        rerunHints:
+          (cardData["rerunHints"] as string[]) ?? [],
+      });
     }
     case "report_template": {
       const incident = (cardData["incident"] as Record<string, unknown>) ?? {};
       const reportType = String(cardData["reportType"] ?? "default");
-      return buildReportTemplateCard(incident, reportType);
+      return buildReportTemplateCard(incident, reportType, {
+        incidentEvents:
+          (cardData["incidentEvents"] as Array<Record<string, unknown>>) ?? [],
+        evidenceSummary:
+          (cardData["evidenceSummary"] as Record<string, unknown>) ?? null,
+        recentAuditLogs:
+          (cardData["recentAuditLogs"] as Array<Record<string, unknown>>) ?? [],
+        pendingActions:
+          (cardData["pendingActions"] as string[]) ?? [],
+      });
     }
     default:
       return null;
