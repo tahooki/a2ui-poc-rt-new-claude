@@ -606,6 +606,49 @@ function clonePreviewInteractiveState(input: PreviewInteractiveState): PreviewIn
   return JSON.parse(JSON.stringify(input)) as PreviewInteractiveState;
 }
 
+function asPreviewRecord(value: unknown): Record<string, unknown> {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  return {};
+}
+
+function asPreviewRecordList(value: unknown): Array<Record<string, unknown>> {
+  if (!Array.isArray(value)) return [];
+  return value.filter(
+    (item): item is Record<string, unknown> =>
+      Boolean(item) && typeof item === "object" && !Array.isArray(item),
+  );
+}
+
+function isA2UIRenderPayload(
+  value: unknown,
+): value is { type: "a2ui_render"; cardType: string; cardData: Record<string, unknown> } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as Record<string, unknown>).type === "a2ui_render" &&
+    typeof (value as Record<string, unknown>).cardType === "string" &&
+    typeof (value as Record<string, unknown>).cardData === "object"
+  );
+}
+
+function setQuickDeployPreviewBase(next: PreviewInteractiveState, patch: Record<string, unknown>) {
+  next.cardData.pipeline = {
+    ...asPreviewRecord(next.cardData.pipeline),
+    ...patch,
+  };
+}
+
+function buildQuickDeployPreviewImageTag(serviceId: string, serviceName: string, sourceVersion: string, revision: number) {
+  const slug = (serviceId.replace(/^svc_/, "") || serviceName)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  const version = sourceVersion.replace(/^v/, "") || "latest";
+  return `${slug || "service"}:${version}-r${revision}`;
+}
+
 function applyPreviewCardAction(
   input: PreviewInteractiveState,
   actionName: string,
@@ -801,6 +844,187 @@ function applyPreviewCardAction(
         latest_request_status: "started",
       };
       return { next, message: "Step 2에서 즉시 시작이 완료되어 새 배포가 시작된 상태로 변경했습니다." };
+    }
+
+    case "build_deploy_artifact": {
+      const baseline = asPreviewRecord(next.cardData.baseline ?? next.cardData.pipeline);
+      const serviceId = String(actionContext.serviceId ?? baseline.serviceId ?? baseline.service_id ?? "");
+      const serviceName = String(
+        (baseline.serviceName ?? baseline.service_name ?? serviceId) || "service",
+      );
+      const sourceVersion = String(
+        actionContext.sourceVersion ??
+          baseline.sourceVersion ??
+          baseline.source_version ??
+          baseline.baseline_version ??
+          baseline.version ??
+          "latest",
+      );
+      const artifact = asPreviewRecord(next.cardData.artifact);
+      const revision = 1;
+      const imageTag = artifact.imageTag
+        ? String(artifact.imageTag)
+        : buildQuickDeployPreviewImageTag(serviceId, serviceName, sourceVersion, revision);
+      const imageUri = artifact.imageUri ? String(artifact.imageUri) : `registry.local/${imageTag}`;
+      const artifactId =
+        String(artifact.id ?? actionContext.artifactId ?? `artifact_preview_${Date.now()}`) || "";
+
+      next.cardData.artifact = {
+        ...artifact,
+        id: artifactId,
+        imageTag,
+        imageUri,
+        status: "ready",
+      };
+      setQuickDeployPreviewBase(next, {
+        state: "artifact_ready",
+        lastMessage: "이미지가 준비되었습니다.",
+      });
+      return { next, message: "미리보기에서 이미지 생성이 완료되었습니다." };
+    }
+
+    case "start_deploy_run": {
+      const baseline = asPreviewRecord(next.cardData.baseline ?? next.cardData.pipeline);
+      const artifact = asPreviewRecord(next.cardData.artifact);
+      const currentDeployRun = asPreviewRecord(next.cardData.deployRun);
+      const serviceId = String(actionContext.serviceId ?? baseline.serviceId ?? baseline.service_id ?? "");
+      const serviceName = String(
+        (baseline.serviceName ?? baseline.service_name ?? serviceId) || "service",
+      );
+      const sourceVersion = String(
+        actionContext.sourceVersion ??
+          baseline.sourceVersion ??
+          baseline.source_version ??
+          baseline.baseline_version ??
+          baseline.version ??
+          "latest",
+      );
+      const imageTag = String(
+        artifact.imageTag ??
+          artifact.image_tag ??
+          buildQuickDeployPreviewImageTag(serviceId, serviceName, sourceVersion, 1),
+      );
+      const artifactId = String(
+        actionContext.artifactId ?? artifact.id ?? baseline.latest_artifact_id ?? `artifact_preview_${Date.now()}`,
+      );
+      const deployRunId = String(
+        actionContext.deployRunId ?? currentDeployRun.id ?? `deploy_run_preview_${Date.now()}`,
+      );
+      const eventDetail = `배포가 시작되었습니다. ${imageTag} 이미지로 롤아웃을 진행합니다.`;
+
+      if (!artifact.id) {
+        next.cardData.artifact = {
+          ...artifact,
+          id: artifactId,
+          imageTag,
+          imageUri: artifact.imageUri ? String(artifact.imageUri) : `registry.local/${imageTag}`,
+          status: "ready",
+        };
+      }
+
+      next.cardData.deployRun = {
+        ...currentDeployRun,
+        id: deployRunId,
+        artifactId,
+        status: "deploying",
+        progressPercent: 10,
+        currentStage: "canary_10",
+        lastMessage: eventDetail,
+        resultDeploymentId: currentDeployRun.resultDeploymentId ?? null,
+      };
+      next.cardData.runEvents = [
+        ...asPreviewRecordList(next.cardData.runEvents),
+        { stage: "canary_10", detail: eventDetail, progressPercent: 10 },
+      ];
+      setQuickDeployPreviewBase(next, {
+        state: "deploying",
+        progressPercent: 10,
+        currentStage: "canary_10",
+        lastMessage: eventDetail,
+      });
+      return { next, message: "미리보기에서 배포 실행이 시작되었습니다." };
+    }
+
+    case "refresh_deploy_status": {
+      const deployRun = asPreviewRecord(next.cardData.deployRun);
+      const currentProgress = Number(deployRun.progressPercent ?? deployRun.progress_percent ?? 0);
+      if (!deployRun.id) {
+        return { next, message: "아직 갱신할 배포 실행이 없습니다." };
+      }
+
+      let status = String(deployRun.status ?? "pending");
+      let progressPercent = currentProgress;
+      let currentStage = String(deployRun.currentStage ?? deployRun.current_stage ?? "pending");
+      let eventDetail = "배포 상태를 다시 확인했습니다.";
+
+      if (["failed", "rolled_back", "succeeded"].includes(status)) {
+        next.cardData.deployRun = {
+          ...deployRun,
+          lastMessage: "이미 종료된 배포입니다.",
+        };
+        setQuickDeployPreviewBase(next, {
+          lastMessage: "이미 종료된 배포입니다.",
+        });
+        return { next, message: "이미 종료된 배포입니다." };
+      } else if (currentProgress < 40) {
+        status = "deploying";
+        progressPercent = 40;
+        currentStage = "canary_10";
+        eventDetail = "canary 10% 구간이 통과되었습니다.";
+      } else if (currentProgress < 70) {
+        status = "deploying";
+        progressPercent = 70;
+        currentStage = "canary_50";
+        eventDetail = "canary 50% 구간으로 확장되었습니다.";
+      } else if (currentProgress < 85) {
+        status = "verifying";
+        progressPercent = 85;
+        currentStage = "verifying";
+        eventDetail = "배포 검증 단계로 이동했습니다.";
+      } else {
+        status = "succeeded";
+        progressPercent = 100;
+        currentStage = "completed";
+        eventDetail = "배포가 성공적으로 완료되었습니다.";
+      }
+
+      next.cardData.deployRun = {
+        ...deployRun,
+        status,
+        progressPercent,
+        currentStage,
+        lastMessage: eventDetail,
+      };
+      next.cardData.runEvents = [
+        ...asPreviewRecordList(next.cardData.runEvents),
+        { stage: currentStage, detail: eventDetail, progressPercent },
+      ];
+      setQuickDeployPreviewBase(next, {
+        state: status === "succeeded" ? "succeeded" : status === "verifying" ? "verifying" : "deploying",
+        progressPercent,
+        currentStage,
+        lastMessage: eventDetail,
+      });
+      return { next, message: "미리보기에서 배포 상태를 갱신했습니다." };
+    }
+
+    case "open_rollback_candidates": {
+      const deployRun = asPreviewRecord(next.cardData.deployRun);
+      const pipeline = asPreviewRecord(next.cardData.pipeline);
+      const baseline = asPreviewRecord(next.cardData.baseline);
+      const rollbackTarget = String(
+        actionContext.deploymentId ??
+          deployRun.resultDeploymentId ??
+          pipeline.sourceDeploymentId ??
+          baseline.sourceDeploymentId ??
+          "",
+      );
+      setQuickDeployPreviewBase(next, {
+        lastMessage: rollbackTarget
+          ? "롤백 후보를 확인했습니다."
+          : "롤백 후보를 찾을 수 없습니다.",
+      });
+      return { next, message: rollbackTarget ? "미리보기에서 롤백 후보 안내를 표시했습니다." : "롤백 후보를 찾지 못했습니다." };
     }
 
     case "select_deploy_baseline":
@@ -1011,14 +1235,50 @@ export default function TemplatesPage() {
     });
   }, [previewResult]);
 
-  const handlePreviewCardAction = useCallback((actionName: string, context: Record<string, unknown>) => {
+  const handlePreviewCardAction = useCallback(async (actionName: string, context: Record<string, unknown>) => {
+    if (actionName === "open_rollback_candidates" && currentOperator) {
+      try {
+        const stringContext: Record<string, string> = {};
+        for (const [key, val] of Object.entries(context)) {
+          stringContext[key] = String(val ?? "");
+        }
+
+        const res = await fetch("/api/a2ui-action", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            actionName,
+            context: stringContext,
+            actorId: currentOperator.id,
+          }),
+        });
+        const payload = (await res.json()) as {
+          success?: boolean;
+          message?: string;
+          data?: unknown;
+          error?: string;
+        };
+
+        if (payload.success && isA2UIRenderPayload(payload.data)) {
+          setPreviewInteractiveState({
+            cardType: payload.data.cardType,
+            cardData: payload.data.cardData,
+          });
+          setPreviewActionMessage(payload.message ?? "롤백 실행 카드를 열었습니다.");
+          return;
+        }
+      } catch (error) {
+        console.error("[TemplatesPage] Failed to load rollback candidates:", error);
+      }
+    }
+
     setPreviewInteractiveState((current) => {
       if (!current) return current;
       const result = applyPreviewCardAction(current, actionName, context);
       setPreviewActionMessage(result.message);
       return result.next;
     });
-  }, []);
+  }, [currentOperator]);
 
   const hasChanges = useMemo(() => {
     if (!editState || !selectedTemplate) return false;

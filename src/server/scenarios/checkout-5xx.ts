@@ -214,6 +214,28 @@ export function seed(db: Database.Database): void {
     updated_at: '2026-03-10T03:28:00Z',
   });
 
+  // ─── Quick Deploy Pipeline POC ───────────────────────────────────────────
+  const insertArtifact = db.prepare(`
+    INSERT OR IGNORE INTO deployment_artifacts
+      (id, service_id, source_deployment_id, source_version, image_uri, image_tag, git_sha, status, created_by, created_at, updated_at)
+    VALUES
+      (@id, @service_id, @source_deployment_id, @source_version, @image_uri, @image_tag, @git_sha, @status, @created_by, @created_at, @updated_at)
+  `);
+
+  insertArtifact.run({
+    id: 'artifact_checkout_prod_41_rebuild',
+    service_id: 'svc_checkout',
+    source_deployment_id: 'dep_checkout_prod_41',
+    source_version: 'v2.3.8',
+    image_uri: 'registry.local/checkout:v2.3.8-r1',
+    image_tag: 'checkout:v2.3.8-r1',
+    git_sha: 'd4f1c91',
+    status: 'pending',
+    created_by: 'op_seungho_park',
+    created_at: '2026-03-10T03:35:00Z',
+    updated_at: '2026-03-10T03:35:00Z',
+  });
+
   // ─── Deployment Diffs ─────────────────────────────────────────────────────
   const insertDiff = db.prepare(`
     INSERT OR IGNORE INTO deployment_diffs

@@ -863,7 +863,7 @@ export const renderDeploymentApprovalInboxCard = tool({
 
 export const renderQuickDeployLaunchpadCard = tool({
   description:
-    '기존 성공 배포를 기준으로 새 배포를 빠르게 시작하는 A2UI 카드를 렌더링합니다. 기본값을 자동 채운 뒤 초안/승인요청/즉시시작 액션을 제공합니다.',
+    '기존 성공 배포를 기준으로 이미지 생성 → 배포 실행 → 결과 확인으로 이어지는 quick deploy 파이프라인 A2UI 카드를 렌더링합니다. 승인 단계는 제외하고 build/start/refresh 액션을 제공합니다.',
   inputSchema: z.object({
     deploymentId: z.string().describe('빠른 배포 카드를 렌더링할 기준 배포의 ID. latest, recent_deployment 같은 별칭도 허용'),
   }),

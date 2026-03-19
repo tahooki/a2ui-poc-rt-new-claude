@@ -69,6 +69,48 @@ export interface Deployment {
   updatedAt: string;
 }
 
+export type DeploymentArtifactStatus = 'pending' | 'building' | 'ready' | 'failed';
+
+export interface DeploymentArtifact {
+  id: string;
+  serviceId: string;
+  sourceDeploymentId: string;
+  sourceVersion: string;
+  imageUri: string;
+  imageTag: string;
+  gitSha: string;
+  status: DeploymentArtifactStatus;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type DeploymentRunStatus = 'pending' | 'deploying' | 'verifying' | 'succeeded' | 'failed' | 'rolled_back';
+
+export interface DeploymentRun {
+  id: string;
+  artifactId: string;
+  serviceId: string;
+  environment: 'production' | 'staging' | 'development';
+  strategy: string;
+  status: DeploymentRunStatus;
+  progressPercent: number;
+  currentStage: string;
+  startedBy: string;
+  resultDeploymentId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DeploymentRunEvent {
+  id: string;
+  deploymentRunId: string;
+  stage: string;
+  detail: string;
+  progressPercent: number;
+  createdAt: string;
+}
+
 export interface DeploymentDiff {
   id: string;
   deploymentId: string;

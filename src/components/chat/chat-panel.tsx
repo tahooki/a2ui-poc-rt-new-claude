@@ -87,11 +87,43 @@ function dbMessageToUIMessage(row: {
   id: string;
   role: string;
   content: string;
+  tool_name?: string | null;
+  tool_result?: string | null;
 }): UIMessage {
+  const parts: UIMessage["parts"] = [];
+
+  if (row.content.trim().length > 0) {
+    parts.push({ type: "text" as const, text: row.content });
+  }
+
+  if (row.tool_name && row.tool_result) {
+    try {
+      const parsed = JSON.parse(row.tool_result) as unknown;
+      if (
+        typeof parsed === "object" &&
+        parsed !== null &&
+        (parsed as Record<string, unknown>).type === "a2ui_render" &&
+        typeof (parsed as Record<string, unknown>).cardType === "string" &&
+        typeof (parsed as Record<string, unknown>).cardData === "object"
+      ) {
+        parts.push({
+          type: "dynamic-tool" as const,
+          toolName: row.tool_name,
+          toolCallId: row.id,
+          state: "output-available" as const,
+          input: {},
+          output: parsed,
+        });
+      }
+    } catch {
+      // Ignore malformed stored tool payloads and fall back to text-only rendering.
+    }
+  }
+
   return {
     id: row.id,
     role: row.role as UIMessage["role"],
-    parts: [{ type: "text" as const, text: row.content }],
+    parts,
   };
 }
 
@@ -101,6 +133,29 @@ function extractTextContent(message: UIMessage): string {
     .filter((p): p is { type: "text"; text: string } => p.type === "text")
     .map((p) => p.text)
     .join("\n");
+}
+
+function buildA2UIActionMessage(input: {
+  actionName: string;
+  message: string;
+  payload: { type: "a2ui_render"; cardType: string; cardData: Record<string, unknown> };
+  context: Record<string, string>;
+}): UIMessage {
+  return {
+    id: crypto.randomUUID(),
+    role: "assistant",
+    parts: [
+      { type: "text" as const, text: input.message },
+      {
+        type: "dynamic-tool" as const,
+        toolName: input.actionName,
+        toolCallId: `a2ui-${Date.now()}`,
+        state: "output-available" as const,
+        input: input.context,
+        output: input.payload,
+      },
+    ],
+  };
 }
 
 export function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
@@ -365,7 +420,66 @@ export function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
 
         const result = await res.json();
 
-        if (result.success && result.message) {
+        if (
+          result.success &&
+          typeof result.data === "object" &&
+          result.data !== null &&
+          (result.data as Record<string, unknown>).type === "a2ui_render" &&
+          typeof (result.data as Record<string, unknown>).cardType === "string" &&
+          typeof (result.data as Record<string, unknown>).cardData === "object"
+        ) {
+          const assistantMessage = buildA2UIActionMessage({
+            actionName,
+            message: `[A2UI 작업 완료] ${result.message ?? "작업이 완료되었습니다."}`,
+            payload: result.data as {
+              type: "a2ui_render";
+              cardType: string;
+              cardData: Record<string, unknown>;
+            },
+            context: stringContext,
+          });
+
+          setMessages((current) => [...current, assistantMessage]);
+
+          let threadId = threadIdRef.current;
+          if (!threadId) {
+            const threadRes = await fetch("/api/chat/threads", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                operatorId: currentOperator.id,
+                page: getChatPage(pathname),
+                selectedEntityId: selectedEntityId ?? undefined,
+              }),
+            });
+            if (threadRes.ok) {
+              const thread = await threadRes.json();
+              if (thread?.id) {
+                threadId = String(thread.id);
+                threadIdRef.current = threadId;
+              }
+            }
+          }
+
+          if (threadId) {
+            try {
+              await fetch(`/api/chat/threads/${encodeURIComponent(threadId)}/messages`, {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({
+                  id: assistantMessage.id,
+                  role: assistantMessage.role,
+                  content: extractTextContent(assistantMessage),
+                  toolName: actionName,
+                  toolResult: JSON.stringify(result.data),
+                }),
+              });
+              savedMessageIdsRef.current.add(assistantMessage.id);
+            } catch (persistError) {
+              console.error("[ChatPanel] Failed to persist A2UI action message:", persistError);
+            }
+          }
+        } else if (result.success && result.message) {
           // Send the action result as a follow-up message to the chat
           sendMessage({
             text: `[A2UI 작업 완료] ${result.message}`,
@@ -382,7 +496,7 @@ export function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
         });
       }
     },
-    [currentOperator, sendMessage],
+    [currentOperator, pathname, selectedEntityId, sendMessage, setMessages],
   );
 
   return (

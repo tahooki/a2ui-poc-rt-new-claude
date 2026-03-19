@@ -1,5 +1,25 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDb, getDeployment, getDeploymentRequest, getOperator, getRollbackPlan } from '@/server/db';
+import {
+  createDeploymentArtifact,
+  createDeploymentRun,
+  createDeploymentRunEvent,
+  getAllDeployments,
+  getAllDeploymentArtifacts,
+  getAllDeploymentRuns,
+  getDb,
+  getDeployment,
+  getDeploymentArtifact,
+  getDeploymentRequest,
+  getDeploymentRun,
+  getLatestDeploymentArtifactForDeployment,
+  getLatestDeploymentRunForDeployment,
+  getOperator,
+  getRollbackPlan,
+  getService,
+  updateDeploymentArtifact,
+  updateDeploymentRun,
+} from '@/server/db';
+import { renderTemplatePreview } from '@/server/a2ui';
 
 /**
  * A2UI Action Handler
@@ -95,6 +115,50 @@ function createDeploymentRequest(input: {
     now,
   );
   return getDeploymentRequest(requestId) as Record<string, unknown> | undefined;
+}
+
+function quickDeployServiceSlug(serviceId: string, serviceName: string) {
+  const base = serviceId.replace(/^svc_/, '') || serviceName;
+  return base
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '') || 'service';
+}
+
+function quickDeployImageTag(serviceId: string, serviceName: string, sourceVersion: string, revision: number) {
+  const version = sourceVersion.replace(/^v/, '') || 'latest';
+  return `${quickDeployServiceSlug(serviceId, serviceName)}:${version}-r${revision}`;
+}
+
+function quickDeployProgressStep(progress: number) {
+  if (progress < 40) return { progress: 40, stage: 'canary_10', status: 'deploying' as const, detail: 'canary 10% 구간을 통과했습니다.' };
+  if (progress < 70) return { progress: 70, stage: 'canary_50', status: 'deploying' as const, detail: 'canary 50% 구간으로 확장했습니다.' };
+  if (progress < 85) return { progress: 85, stage: 'verifying', status: 'verifying' as const, detail: '배포 검증 단계로 이동했습니다.' };
+  return { progress: 100, stage: 'completed', status: 'succeeded' as const, detail: '배포가 성공적으로 완료되었습니다.' };
+}
+
+function resolveQuickDeployDeploymentContext(input: {
+  deploymentId?: string;
+  baselineDeploymentId?: string;
+  artifactId?: string;
+  deployRunId?: string;
+}) {
+  const deploymentId = input.deploymentId ?? input.baselineDeploymentId ?? '';
+  const baseline = deploymentId ? (getDeployment(deploymentId) as Record<string, unknown> | undefined) : undefined;
+  const artifact =
+    input.artifactId
+      ? (getDeploymentArtifact(input.artifactId) as Record<string, unknown> | undefined)
+      : deploymentId
+        ? (getLatestDeploymentArtifactForDeployment(deploymentId) as Record<string, unknown> | undefined)
+        : undefined;
+  const run =
+    input.deployRunId
+      ? (getDeploymentRun(input.deployRunId) as Record<string, unknown> | undefined)
+      : deploymentId
+        ? (getLatestDeploymentRunForDeployment(deploymentId) as Record<string, unknown> | undefined)
+        : undefined;
+
+  return { baseline, artifact, run, deploymentId };
 }
 
 // Internal fetch helper to call sibling API routes
@@ -295,6 +359,265 @@ const handlers: Record<
 
   async start_quick_deploy(ctx, actorId, req) {
     return handlers.quick_deploy_start_now(ctx, actorId, req);
+  },
+
+  async build_deploy_artifact(ctx, actorId, _req) {
+    const baselineDeploymentId = ctx.baselineDeploymentId ?? ctx.deploymentId;
+    if (!baselineDeploymentId) {
+      throw new Error('이미지 생성에는 baselineDeploymentId가 필요합니다.');
+    }
+
+    const baseline = getDeployment(baselineDeploymentId) as Record<string, unknown> | undefined;
+    if (!baseline) {
+      throw new Error(`기준 배포를 찾을 수 없습니다: ${baselineDeploymentId}`);
+    }
+
+    const serviceId = String(ctx.serviceId ?? baseline['service_id'] ?? '');
+    const service = getService(serviceId) as Record<string, unknown> | undefined;
+    const serviceName = String(service?.['name'] ?? serviceId);
+    const sourceVersion = String(ctx.sourceVersion ?? baseline['version'] ?? '');
+    const existingArtifacts = getAllDeploymentArtifacts({ sourceDeploymentId: baselineDeploymentId }) as Array<Record<string, unknown>>;
+    const revision = existingArtifacts.length + 1;
+    const imageTag = quickDeployImageTag(serviceId, serviceName, sourceVersion, revision);
+    const imageUri = `registry.local/${imageTag}`;
+    const artifact = createDeploymentArtifact({
+      serviceId,
+      sourceDeploymentId: baselineDeploymentId,
+      sourceVersion,
+      imageTag,
+      imageUri,
+      gitSha: String(ctx.gitSha ?? ''),
+      status: 'ready',
+      createdBy: actorId,
+    }) as Record<string, unknown> | undefined;
+
+    return {
+      message: '이미지 생성이 완료되었습니다.',
+      data: {
+        baselineDeploymentId,
+        artifact,
+      },
+    };
+  },
+
+  async start_deploy_run(ctx, actorId, _req) {
+    const baselineDeploymentId = ctx.baselineDeploymentId ?? ctx.deploymentId;
+    if (!baselineDeploymentId) {
+      throw new Error('배포 실행에는 baselineDeploymentId가 필요합니다.');
+    }
+
+    const baseline = getDeployment(baselineDeploymentId) as Record<string, unknown> | undefined;
+    if (!baseline) {
+      throw new Error(`기준 배포를 찾을 수 없습니다: ${baselineDeploymentId}`);
+    }
+
+    const serviceId = String(ctx.serviceId ?? baseline['service_id'] ?? '');
+    const service = getService(serviceId) as Record<string, unknown> | undefined;
+    const serviceName = String(service?.['name'] ?? serviceId);
+    const environment = String(ctx.environment ?? baseline['environment'] ?? 'production') as
+      | 'production'
+      | 'staging'
+      | 'development';
+    const strategy = String(ctx.strategy ?? 'canary_10_50_100');
+    const sourceVersion = String(ctx.sourceVersion ?? baseline['version'] ?? '');
+    let artifact = ctx.artifactId
+      ? (getDeploymentArtifact(ctx.artifactId) as Record<string, unknown> | undefined)
+      : (getLatestDeploymentArtifactForDeployment(baselineDeploymentId) as Record<string, unknown> | undefined);
+
+    if (!artifact) {
+      const imageTag = quickDeployImageTag(serviceId, serviceName, sourceVersion, 1);
+      artifact = createDeploymentArtifact({
+        serviceId,
+        sourceDeploymentId: baselineDeploymentId,
+        sourceVersion,
+        imageTag,
+        imageUri: `registry.local/${imageTag}`,
+        status: 'ready',
+        createdBy: actorId,
+      }) as Record<string, unknown> | undefined;
+    } else if (String(artifact['status'] ?? '') !== 'ready') {
+      artifact = updateDeploymentArtifact(String(artifact['id'] ?? ''), {
+        status: 'ready',
+      }) as Record<string, unknown> | undefined;
+    }
+
+    if (!artifact?.['id']) {
+      throw new Error('배포 이미지를 준비하지 못했습니다.');
+    }
+
+    const deploymentId = `dep_${serviceId.replace(/^svc_/, '') || 'service'}_${environment}_${Date.now()}`;
+    const version = String(artifact['image_tag'] ?? artifact['imageTag'] ?? sourceVersion);
+    getDb().prepare(
+      `INSERT INTO deployments
+        (id, service_id, environment, version, previous_version, status, rollout_percent, deployed_by, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 'running', 10, ?, ?, ?)`,
+    ).run(
+      deploymentId,
+      serviceId,
+      environment,
+      version,
+      sourceVersion,
+      actorId,
+      new Date().toISOString(),
+      new Date().toISOString(),
+    );
+
+    const run = createDeploymentRun({
+      artifactId: String(artifact['id']),
+      serviceId,
+      environment,
+      strategy,
+      status: 'deploying',
+      progressPercent: 10,
+      currentStage: 'canary_10',
+      startedBy: actorId,
+      resultDeploymentId: deploymentId,
+    }) as Record<string, unknown> | undefined;
+
+    createDeploymentRunEvent({
+      deploymentRunId: String(run?.['id'] ?? ''),
+      stage: 'canary_10',
+      detail: `배포가 시작되었습니다. ${version} 이미지가 ${environment} 환경으로 롤아웃됩니다.`,
+      progressPercent: 10,
+    });
+
+    return {
+      message: '배포가 시작되었습니다.',
+      data: {
+        artifact,
+        deployRun: run,
+        deploymentId,
+      },
+    };
+  },
+
+  async refresh_deploy_status(ctx, _actorId, _req) {
+    const resolved = resolveQuickDeployDeploymentContext({
+      deploymentId: ctx.deploymentId,
+      baselineDeploymentId: ctx.baselineDeploymentId,
+      artifactId: ctx.artifactId,
+      deployRunId: ctx.deployRunId,
+    });
+    if (!resolved.run?.['id']) {
+      throw new Error('갱신할 배포 실행을 찾을 수 없습니다.');
+    }
+
+    const runId = String(resolved.run['id']);
+    const currentProgress = Number(resolved.run['progress_percent'] ?? 0);
+    const currentStatus = String(resolved.run['status'] ?? 'pending');
+    if (['failed', 'rolled_back', 'succeeded'].includes(currentStatus)) {
+      return {
+        message: '이미 종료된 배포입니다.',
+        data: {
+          deployRun: resolved.run,
+          artifact: resolved.artifact,
+        },
+      };
+    }
+
+    const step = quickDeployProgressStep(currentProgress);
+    const updatedRun = updateDeploymentRun(runId, {
+      status: step.status,
+      progressPercent: step.progress,
+      currentStage: step.stage,
+    }) as Record<string, unknown> | undefined;
+
+    const deploymentId =
+      String(updatedRun?.['result_deployment_id'] ?? resolved.run['result_deployment_id'] ?? ctx.deploymentId ?? '');
+    if (deploymentId) {
+      getDb().prepare(
+        `UPDATE deployments
+         SET status = ?, rollout_percent = ?, updated_at = ?
+         WHERE id = ?`,
+      ).run(
+        step.status === 'succeeded' ? 'succeeded' : 'running',
+        step.progress,
+        new Date().toISOString(),
+        deploymentId,
+      );
+    }
+
+    createDeploymentRunEvent({
+      deploymentRunId: runId,
+      stage: step.stage,
+      detail: step.detail,
+      progressPercent: step.progress,
+    });
+
+    return {
+      message: '배포 상태를 갱신했습니다.',
+      data: {
+        deployRun: updatedRun,
+        artifact: resolved.artifact,
+        deploymentId,
+      },
+    };
+  },
+
+  async open_rollback_candidates(ctx, actorId, _req) {
+    const resolved = resolveQuickDeployDeploymentContext({
+      deploymentId: ctx.deploymentId,
+      baselineDeploymentId: ctx.baselineDeploymentId,
+      artifactId: ctx.artifactId,
+      deployRunId: ctx.deployRunId,
+    });
+
+    const targetDeploymentId =
+      String(resolved.run?.['result_deployment_id'] ?? resolved.deploymentId ?? ctx.deploymentId ?? '');
+    if (!targetDeploymentId) {
+      return {
+        message: '롤백 후보를 찾지 못했습니다.',
+        data: {
+          type: 'a2ui_render',
+          cardType: 'rollback_action',
+          cardData: {
+            deploymentId: '',
+            serviceId: '',
+            environment: '',
+            candidates: [],
+          },
+        },
+      };
+    }
+
+    const deployment = getDeployment(targetDeploymentId) as Record<string, unknown> | undefined;
+    if (!deployment) {
+      return {
+        message: '롤백 후보를 찾지 못했습니다.',
+        data: {
+          type: 'a2ui_render',
+          cardType: 'rollback_action',
+          cardData: {
+            deploymentId: targetDeploymentId,
+            serviceId: '',
+            environment: '',
+            candidates: [],
+          },
+        },
+      };
+    }
+
+    const preview = await renderTemplatePreview({
+      templateId: 'tpl_rollback_action',
+      args: {
+        deploymentId: targetDeploymentId,
+      },
+      // Reuse the seeded rollback candidate source and preserve the current operator context.
+      context: (() => {
+        const operator = getOperator(actorId) as Record<string, unknown> | undefined;
+        return {
+          actorId,
+          actorRole: String(operator?.['role'] ?? 'ops_engineer'),
+          page: 'deployments',
+        };
+      })(),
+      missingLabel: '롤백 실행',
+    });
+
+    return {
+      message: '롤백 후보를 확인했습니다. 롤백 실행 카드를 열었습니다.',
+      data: preview.output,
+    };
   },
 
   async approve_deploy_request(ctx, actorId, _req) {

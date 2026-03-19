@@ -2,10 +2,15 @@ import {
   getA2UIDataSourceOverrides,
   getAllIncidents,
   getAllDeployments,
+  getAllDeploymentArtifacts,
+  getAllDeploymentRuns,
   getAllDeploymentRequests,
   getAllJobTemplates,
+  getDeploymentArtifact,
   getDeployment,
   getDeploymentDiffs,
+  getDeploymentPipelineRunEvents,
+  getDeploymentRun,
   getDeploymentRiskChecks,
   getAuditLogs,
   getIncident,
@@ -14,6 +19,8 @@ import {
   getJobRun,
   getJobRunEvents,
   getLatestDeploymentRequestForBaseline,
+  getLatestDeploymentArtifactForDeployment,
+  getLatestDeploymentRunForDeployment,
   getService,
   getRollbackPlan,
   getRollbackSteps,
@@ -258,6 +265,19 @@ function summarizeChangeCounts(deploymentId: string) {
   };
 }
 
+function toQuickDeployServiceSlug(serviceId: string, serviceName: string) {
+  const base = serviceId.replace(/^svc_/, "") || serviceName;
+  return base
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "service";
+}
+
+function formatQuickDeployImageTag(serviceSlug: string, sourceVersion: string, revision: number) {
+  const normalizedVersion = sourceVersion.replace(/^v/, "") || "latest";
+  return `${serviceSlug}:${normalizedVersion}-r${revision}`;
+}
+
 function getQuickDeployBaseline(input: { deploymentId: string; actorId: string }) {
   const deployment = getDeployment(input.deploymentId) as Record<string, unknown> | undefined;
   if (!deployment) {
@@ -277,16 +297,48 @@ function getQuickDeployBaseline(input: { deploymentId: string; actorId: string }
   const latestRequest = getLatestDeploymentRequestForBaseline(input.deploymentId) as
     | Record<string, unknown>
     | undefined;
+  const latestArtifact = getLatestDeploymentArtifactForDeployment(input.deploymentId) as
+    | Record<string, unknown>
+    | undefined;
+  const latestRun = getLatestDeploymentRunForDeployment(input.deploymentId) as
+    | Record<string, unknown>
+    | undefined;
+  const latestRunEvents = latestRun
+    ? (getDeploymentPipelineRunEvents(String(latestRun["id"] ?? "")) as Array<Record<string, unknown>>)
+    : [];
+  const latestRunEvent = latestRunEvents[latestRunEvents.length - 1];
+  const artifactStatus = asText(latestArtifact?.["status"], "pending");
+  const runStatus = asText(latestRun?.["status"], "pending");
+  const pipelineState =
+    runStatus === "succeeded"
+      ? "succeeded"
+      : ["failed", "rolled_back"].includes(runStatus)
+        ? "failed"
+        : ["deploying", "verifying"].includes(runStatus)
+          ? "deploying"
+          : artifactStatus === "ready"
+            ? "artifact_ready"
+            : artifactStatus === "building"
+              ? "building"
+              : "pending";
 
   return {
     baseline_deployment_id: input.deploymentId,
+    source_deployment_id: input.deploymentId,
+    sourceDeploymentId: input.deploymentId,
     service_id: serviceId,
+    serviceId,
     service_name: asText(service?.["name"], serviceId),
+    serviceName: asText(service?.["name"], serviceId),
     environment: asText(deployment["environment"], ""),
+    source_version: asText(deployment["version"], ""),
+    sourceVersion: asText(deployment["version"], ""),
     baseline_version: asText(deployment["version"], ""),
     previous_version: asText(deployment["previous_version"], ""),
     baseline_status: asText(deployment["status"], ""),
+    baseline_rollout_percent: Number(deployment["rollout_percent"] ?? 0),
     suggested_strategy: "canary 10 -> 50 -> 100",
+    strategy: asText(latestRun?.["strategy"], "canary_10_50_100"),
     recent_risk_summary: summary,
     riskSummary: {
       pass: riskChecks.filter((item) => String(item["status"] ?? "") === "pass").length,
@@ -300,12 +352,137 @@ function getQuickDeployBaseline(input: { deploymentId: string; actorId: string }
     requested_by: asText(operator?.["name"], asText(operator?.["id"], input.actorId)),
     latest_request_status: asText(latestRequest?.["status"], ""),
     latest_request_id: asText(latestRequest?.["id"], ""),
-    approvalRequired: warned.length > 0 || failed.length > 0,
+    latest_artifact_id: latestArtifact?.["id"] ?? null,
+    latest_run_id: latestRun?.["id"] ?? null,
+    pipeline_state: pipelineState,
+    state: pipelineState,
+    progress_percent:
+      Number(latestRun?.["progress_percent"] ?? 0) || (artifactStatus === "ready" ? 20 : 0),
+    current_stage: asText(
+      latestRun?.["current_stage"],
+      artifactStatus === "ready" ? "artifact_ready" : "pending",
+    ),
+    last_message: asText(
+      latestRunEvent?.["detail"],
+      pipelineState === "pending"
+        ? "아직 배포 실행 전입니다."
+        : pipelineState === "artifact_ready"
+          ? "이미지가 준비되었습니다."
+          : "배포 파이프라인을 진행 중입니다.",
+    ),
+    approvalRequired: false,
     canImmediateStart:
       ["release_manager", "ops_engineer"].includes(asText(operator?.["role"], "")) &&
       asText(deployment["status"], "") === "succeeded" &&
       failed.length === 0,
   };
+}
+
+function getQuickDeployArtifact(input: { deploymentId: string; actorId: string }) {
+  const baseline = getQuickDeployBaseline(input);
+  if (!baseline) {
+    return null;
+  }
+
+  const artifacts = getAllDeploymentArtifacts({
+    sourceDeploymentId: input.deploymentId,
+  }) as Array<Record<string, unknown>>;
+  const latestArtifact = artifacts[0];
+  const serviceSlug = toQuickDeployServiceSlug(
+    String(baseline.serviceId ?? baseline.service_id ?? "service"),
+    String(baseline.serviceName ?? baseline.service_name ?? "service"),
+  );
+  const sourceVersion = asText(baseline.sourceVersion ?? baseline.source_version, "latest");
+  const revision = Math.max(1, artifacts.length || 1);
+  const imageTag = asText(
+    latestArtifact?.["image_tag"],
+    formatQuickDeployImageTag(serviceSlug, sourceVersion, revision),
+  );
+
+  return {
+    id: latestArtifact?.["id"] ?? null,
+    service_id: baseline.serviceId ?? baseline.service_id,
+    serviceId: baseline.serviceId ?? baseline.service_id,
+    service_name: baseline.serviceName ?? baseline.service_name,
+    source_deployment_id: input.deploymentId,
+    sourceDeploymentId: input.deploymentId,
+    source_version: sourceVersion,
+    sourceVersion,
+    image_tag: imageTag,
+    imageTag,
+    image_uri: asText(latestArtifact?.["image_uri"], `registry.local/${imageTag}`),
+    imageUri: asText(latestArtifact?.["image_uri"], `registry.local/${imageTag}`),
+    git_sha: asText(latestArtifact?.["git_sha"], ""),
+    status: asText(latestArtifact?.["status"], "pending"),
+    state: asText(latestArtifact?.["status"], "pending"),
+    created_by: asText(latestArtifact?.["created_by"], baseline.requested_by),
+    created_at: asText(latestArtifact?.["created_at"], ""),
+    updated_at: asText(latestArtifact?.["updated_at"], ""),
+  };
+}
+
+function getQuickDeployRun(input: { deploymentId: string; actorId: string }) {
+  const baseline = getQuickDeployBaseline(input);
+  if (!baseline) {
+    return null;
+  }
+
+  const run = getLatestDeploymentRunForDeployment(input.deploymentId) as
+    | Record<string, unknown>
+    | undefined;
+  const events = run
+    ? (getDeploymentPipelineRunEvents(String(run["id"] ?? "")) as Array<Record<string, unknown>>)
+    : [];
+  const lastEvent = events[events.length - 1];
+  const status = asText(run?.["status"], "pending");
+  const progressPercent = Number(run?.["progress_percent"] ?? 0) || (status === "pending" ? 0 : 20);
+
+  return {
+    id: run?.["id"] ?? null,
+    artifact_id: run?.["artifact_id"] ?? baseline.latest_artifact_id ?? null,
+    artifactId: run?.["artifact_id"] ?? baseline.latest_artifact_id ?? null,
+    service_id: baseline.serviceId ?? baseline.service_id,
+    serviceId: baseline.serviceId ?? baseline.service_id,
+    environment: baseline.environment,
+    strategy: asText(run?.["strategy"], baseline.strategy ?? "canary_10_50_100"),
+    status,
+    progress_percent: progressPercent,
+    progressPercent,
+    current_stage: asText(run?.["current_stage"], progressPercent > 0 ? "verifying" : "pending"),
+    currentStage: asText(run?.["current_stage"], progressPercent > 0 ? "verifying" : "pending"),
+    last_message: asText(
+      lastEvent?.["detail"],
+      status === "pending"
+        ? "배포 실행 대기 중"
+        : status === "succeeded"
+          ? "배포가 성공했습니다."
+          : status === "failed"
+            ? "배포가 실패했습니다."
+            : "배포 진행 중",
+    ),
+    started_by: asText(run?.["started_by"], baseline.requested_by),
+    result_deployment_id: run?.["result_deployment_id"] ?? null,
+    resultDeploymentId: run?.["result_deployment_id"] ?? null,
+    created_at: asText(run?.["created_at"], ""),
+    updated_at: asText(run?.["updated_at"], ""),
+  };
+}
+
+function getQuickDeployRunEvents(input: { deploymentId: string; actorId: string }) {
+  const run = getQuickDeployRun(input);
+  if (!run?.id) {
+    return [];
+  }
+
+  return (getDeploymentPipelineRunEvents(String(run.id)) as Array<Record<string, unknown>>).map(
+    (event) => ({
+      id: event["id"],
+      stage: asText(event["stage"], "pending"),
+      detail: asText(event["detail"], ""),
+      progressPercent: Number(event["progress_percent"] ?? 0),
+      created_at: asText(event["created_at"], ""),
+    }),
+  );
 }
 
 function getDeploymentApprovalQueue(input: { actorId: string; actorRole: string }) {
@@ -460,6 +637,14 @@ export const INTERNAL_SOURCE_HANDLERS: Record<string, InternalHandler> = {
     getRollbackCandidatesForDeployment(deploymentId) as Array<Record<string, unknown>>,
   "deployment.quickLaunchBaseline": ({ deploymentId, actorId }) =>
     (getQuickDeployBaseline({ deploymentId, actorId }) as Record<string, unknown> | null),
+  "deployment.quickPipelineBaseline": ({ deploymentId, actorId }) =>
+    (getQuickDeployBaseline({ deploymentId, actorId }) as Record<string, unknown> | null),
+  "deployment.quickPipelineArtifact": ({ deploymentId, actorId }) =>
+    (getQuickDeployArtifact({ deploymentId, actorId }) as Record<string, unknown> | null),
+  "deployment.quickPipelineRun": ({ deploymentId, actorId }) =>
+    (getQuickDeployRun({ deploymentId, actorId }) as Record<string, unknown> | null),
+  "deployment.quickPipelineEvents": ({ deploymentId, actorId }) =>
+    getQuickDeployRunEvents({ deploymentId, actorId }) as Array<Record<string, unknown>>,
   "deployment.approvalQueue": ({ actorId, actorRole }) =>
     getDeploymentApprovalQueue({ actorId, actorRole }) as Array<Record<string, unknown>>,
   "incident.detail": ({ incidentId }) =>
@@ -885,6 +1070,38 @@ export const DATA_SOURCE_DEFINITIONS: DataSourceDef[] = [
     timeoutMs: 1500,
     inputSchema: { type: "object", required: ["deploymentId", "actorId"] },
     outputSchema: { type: "object", nullable: true },
+  },
+  {
+    id: "deployment.quickPipelineBaseline",
+    kind: "internal_db",
+    handlerKey: "deployment.quickPipelineBaseline",
+    timeoutMs: 1500,
+    inputSchema: { type: "object", required: ["deploymentId", "actorId"] },
+    outputSchema: { type: "object", nullable: true },
+  },
+  {
+    id: "deployment.quickPipelineArtifact",
+    kind: "internal_db",
+    handlerKey: "deployment.quickPipelineArtifact",
+    timeoutMs: 1500,
+    inputSchema: { type: "object", required: ["deploymentId", "actorId"] },
+    outputSchema: { type: "object", nullable: true },
+  },
+  {
+    id: "deployment.quickPipelineRun",
+    kind: "internal_db",
+    handlerKey: "deployment.quickPipelineRun",
+    timeoutMs: 1500,
+    inputSchema: { type: "object", required: ["deploymentId", "actorId"] },
+    outputSchema: { type: "object", nullable: true },
+  },
+  {
+    id: "deployment.quickPipelineEvents",
+    kind: "internal_db",
+    handlerKey: "deployment.quickPipelineEvents",
+    timeoutMs: 1500,
+    inputSchema: { type: "object", required: ["deploymentId", "actorId"] },
+    outputSchema: { type: "array" },
   },
   {
     id: "deployment.approvalQueue",

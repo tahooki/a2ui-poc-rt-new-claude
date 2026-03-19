@@ -48,7 +48,11 @@ export const TEMPLATE_DEFINITIONS: A2UITemplateDef[] = [
     description: SEED_TEMPLATE_MAP["tpl_quick_deploy_launchpad"].description,
     cardType: "quick_deploy_launchpad",
     requiredBindings: ["tpl_quick_deploy_launchpad.baseline"],
-    optionalBindings: [],
+    optionalBindings: [
+      "tpl_quick_deploy_launchpad.artifact",
+      "tpl_quick_deploy_launchpad.deployRun",
+      "tpl_quick_deploy_launchpad.runEvents",
+    ],
     fallbackPolicy: { mode: "text_fallback" },
   },
   {

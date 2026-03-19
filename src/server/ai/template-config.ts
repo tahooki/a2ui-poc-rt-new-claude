@@ -159,15 +159,15 @@ export const SEED_A2UI_TEMPLATES: SeedA2UITemplateDefinition[] = [
   {
     id: "tpl_quick_deploy_launchpad",
     name: "간단 배포 시작",
-    description: "기존 성공 배포를 기준으로 새 배포를 빠르게 시작하는 A2UI 카드",
+    description: "이미지 생성 → 배포 실행 → 결과 확인까지 이어지는 3단계 quick deploy 파이프라인 A2UI 카드",
     cardType: "quick_deploy_launchpad",
     builderKey: "quick_deploy_launchpad",
     toolName: "renderQuickDeployLaunchpadCard",
     category: "deployments",
     isEnabledByDefault: true,
     promptHint:
-      "이전 배포 기준으로 빠르게 새 배포를 시작하거나 승인 요청을 만들 때 사용",
-    keywords: ["간단 배포", "빠른 배포", "재배포", "다시 배포", "quick deploy"],
+      "이전 성공 배포를 기준으로 이미지를 만들고 즉시 배포를 시작해 결과를 확인할 때 사용. 승인 단계는 제외한다",
+    keywords: ["간단 배포", "빠른 배포", "재배포", "다시 배포", "quick deploy", "이미지 생성", "배포 시작", "결과 확인"],
     allowedPages: ["dashboard", "deployments"],
     allowedRoles: ["release_manager", "ops_engineer"],
     decisionInputs: [

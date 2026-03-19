@@ -147,6 +147,44 @@ function initSchema(db: Database.Database) {
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    CREATE TABLE IF NOT EXISTS deployment_artifacts (
+      id TEXT PRIMARY KEY,
+      service_id TEXT NOT NULL REFERENCES services(id),
+      source_deployment_id TEXT NOT NULL REFERENCES deployments(id),
+      source_version TEXT NOT NULL,
+      image_uri TEXT NOT NULL,
+      image_tag TEXT NOT NULL,
+      git_sha TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL CHECK(status IN ('pending','building','ready','failed')) DEFAULT 'pending',
+      created_by TEXT NOT NULL REFERENCES operators(id),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS deployment_runs (
+      id TEXT PRIMARY KEY,
+      artifact_id TEXT NOT NULL REFERENCES deployment_artifacts(id),
+      service_id TEXT NOT NULL REFERENCES services(id),
+      environment TEXT NOT NULL CHECK(environment IN ('production','staging','development')),
+      strategy TEXT NOT NULL DEFAULT 'canary_10_50_100',
+      status TEXT NOT NULL CHECK(status IN ('pending','deploying','verifying','succeeded','failed','rolled_back')) DEFAULT 'pending',
+      progress_percent INTEGER NOT NULL DEFAULT 0,
+      current_stage TEXT NOT NULL DEFAULT 'pending',
+      started_by TEXT NOT NULL REFERENCES operators(id),
+      result_deployment_id TEXT REFERENCES deployments(id),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS deployment_run_events (
+      id TEXT PRIMARY KEY,
+      deployment_run_id TEXT NOT NULL REFERENCES deployment_runs(id),
+      stage TEXT NOT NULL,
+      detail TEXT NOT NULL DEFAULT '',
+      progress_percent INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     -- Jobs
     CREATE TABLE IF NOT EXISTS job_templates (
       id TEXT PRIMARY KEY,
@@ -360,6 +398,13 @@ function initSchema(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_deployments_service ON deployments(service_id);
     CREATE INDEX IF NOT EXISTS idx_deployment_requests_status ON deployment_requests(status);
     CREATE INDEX IF NOT EXISTS idx_deployment_requests_service ON deployment_requests(service_id);
+    CREATE INDEX IF NOT EXISTS idx_deployment_artifacts_service ON deployment_artifacts(service_id);
+    CREATE INDEX IF NOT EXISTS idx_deployment_artifacts_source ON deployment_artifacts(source_deployment_id);
+    CREATE INDEX IF NOT EXISTS idx_deployment_artifacts_status ON deployment_artifacts(status);
+    CREATE INDEX IF NOT EXISTS idx_deployment_runs_service ON deployment_runs(service_id);
+    CREATE INDEX IF NOT EXISTS idx_deployment_runs_artifact ON deployment_runs(artifact_id);
+    CREATE INDEX IF NOT EXISTS idx_deployment_runs_status ON deployment_runs(status);
+    CREATE INDEX IF NOT EXISTS idx_deployment_run_events_run ON deployment_run_events(deployment_run_id);
     CREATE INDEX IF NOT EXISTS idx_audit_logs_target ON audit_logs(target_type, target_id);
     CREATE INDEX IF NOT EXISTS idx_audit_logs_actor ON audit_logs(actor_id);
     CREATE INDEX IF NOT EXISTS idx_job_runs_status ON job_runs(status);
@@ -654,6 +699,266 @@ export function getLatestDeploymentRequestForBaseline(baselineDeploymentId: stri
       'SELECT * FROM deployment_requests WHERE baseline_deployment_id = ? ORDER BY created_at DESC LIMIT 1',
     )
     .get(baselineDeploymentId);
+}
+
+export function getDeploymentArtifact(id: string) {
+  return getDb().prepare('SELECT * FROM deployment_artifacts WHERE id = ?').get(id);
+}
+
+export function getAllDeploymentArtifacts(filters?: {
+  serviceId?: string;
+  sourceDeploymentId?: string;
+  status?: string;
+}) {
+  let sql = 'SELECT * FROM deployment_artifacts WHERE 1=1';
+  const params: string[] = [];
+  if (filters?.serviceId) {
+    sql += ' AND service_id = ?';
+    params.push(filters.serviceId);
+  }
+  if (filters?.sourceDeploymentId) {
+    sql += ' AND source_deployment_id = ?';
+    params.push(filters.sourceDeploymentId);
+  }
+  if (filters?.status) {
+    sql += ' AND status = ?';
+    params.push(filters.status);
+  }
+  sql += ' ORDER BY created_at DESC';
+  return getDb().prepare(sql).all(...params);
+}
+
+export function getLatestDeploymentArtifactForDeployment(sourceDeploymentId: string) {
+  return getDb()
+    .prepare(
+      'SELECT * FROM deployment_artifacts WHERE source_deployment_id = ? ORDER BY created_at DESC LIMIT 1',
+    )
+    .get(sourceDeploymentId);
+}
+
+export function createDeploymentArtifact(input: {
+  id?: string;
+  serviceId: string;
+  sourceDeploymentId: string;
+  sourceVersion: string;
+  imageUri: string;
+  imageTag: string;
+  gitSha?: string;
+  status?: 'pending' | 'building' | 'ready' | 'failed';
+  createdBy: string;
+  createdAt?: string;
+  updatedAt?: string;
+}) {
+  const id = input.id ?? crypto.randomUUID();
+  const now = input.createdAt ?? new Date().toISOString();
+  getDb()
+    .prepare(
+      `INSERT INTO deployment_artifacts
+        (id, service_id, source_deployment_id, source_version, image_uri, image_tag, git_sha, status, created_by, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      id,
+      input.serviceId,
+      input.sourceDeploymentId,
+      input.sourceVersion,
+      input.imageUri,
+      input.imageTag,
+      input.gitSha ?? '',
+      input.status ?? 'pending',
+      input.createdBy,
+      now,
+      input.updatedAt ?? now,
+    );
+  return getDeploymentArtifact(id);
+}
+
+export function updateDeploymentArtifact(
+  id: string,
+  updates: Partial<{
+    status: 'pending' | 'building' | 'ready' | 'failed';
+    imageUri: string;
+    imageTag: string;
+    gitSha: string;
+    updatedAt: string;
+  }>,
+) {
+  const current = getDeploymentArtifact(id) as Record<string, unknown> | undefined;
+  if (!current) return null;
+
+  const next = {
+    status: updates.status ?? String(current.status ?? 'pending'),
+    imageUri: updates.imageUri ?? String(current.image_uri ?? ''),
+    imageTag: updates.imageTag ?? String(current.image_tag ?? ''),
+    gitSha: updates.gitSha ?? String(current.git_sha ?? ''),
+    updatedAt: updates.updatedAt ?? new Date().toISOString(),
+  };
+
+  getDb()
+    .prepare(
+      `UPDATE deployment_artifacts
+       SET status = ?, image_uri = ?, image_tag = ?, git_sha = ?, updated_at = ?
+       WHERE id = ?`,
+    )
+    .run(next.status, next.imageUri, next.imageTag, next.gitSha, next.updatedAt, id);
+  return getDeploymentArtifact(id);
+}
+
+export function getDeploymentRun(id: string) {
+  return getDb().prepare('SELECT * FROM deployment_runs WHERE id = ?').get(id);
+}
+
+export function getAllDeploymentRuns(filters?: {
+  serviceId?: string;
+  artifactId?: string;
+  status?: string;
+}) {
+  let sql = 'SELECT * FROM deployment_runs WHERE 1=1';
+  const params: string[] = [];
+  if (filters?.serviceId) {
+    sql += ' AND service_id = ?';
+    params.push(filters.serviceId);
+  }
+  if (filters?.artifactId) {
+    sql += ' AND artifact_id = ?';
+    params.push(filters.artifactId);
+  }
+  if (filters?.status) {
+    sql += ' AND status = ?';
+    params.push(filters.status);
+  }
+  sql += ' ORDER BY created_at DESC';
+  return getDb().prepare(sql).all(...params);
+}
+
+export function getLatestDeploymentRunForDeployment(sourceDeploymentId: string) {
+  return getDb()
+    .prepare(
+      `SELECT r.*
+       FROM deployment_runs r
+       JOIN deployment_artifacts a ON a.id = r.artifact_id
+       WHERE a.source_deployment_id = ?
+       ORDER BY r.created_at DESC
+       LIMIT 1`,
+    )
+    .get(sourceDeploymentId);
+}
+
+export function createDeploymentRun(input: {
+  id?: string;
+  artifactId: string;
+  serviceId: string;
+  environment: 'production' | 'staging' | 'development';
+  strategy?: string;
+  status?: 'pending' | 'deploying' | 'verifying' | 'succeeded' | 'failed' | 'rolled_back';
+  progressPercent?: number;
+  currentStage?: string;
+  startedBy: string;
+  resultDeploymentId?: string | null;
+  createdAt?: string;
+  updatedAt?: string;
+}) {
+  const id = input.id ?? crypto.randomUUID();
+  const now = input.createdAt ?? new Date().toISOString();
+  getDb()
+    .prepare(
+      `INSERT INTO deployment_runs
+        (id, artifact_id, service_id, environment, strategy, status, progress_percent, current_stage, started_by, result_deployment_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      id,
+      input.artifactId,
+      input.serviceId,
+      input.environment,
+      input.strategy ?? 'canary_10_50_100',
+      input.status ?? 'pending',
+      input.progressPercent ?? 0,
+      input.currentStage ?? 'pending',
+      input.startedBy,
+      input.resultDeploymentId ?? null,
+      now,
+      input.updatedAt ?? now,
+    );
+  return getDeploymentRun(id);
+}
+
+export function updateDeploymentRun(
+  id: string,
+  updates: Partial<{
+    status: 'pending' | 'deploying' | 'verifying' | 'succeeded' | 'failed' | 'rolled_back';
+    progressPercent: number;
+    currentStage: string;
+    resultDeploymentId: string | null;
+    updatedAt: string;
+  }>,
+) {
+  const current = getDeploymentRun(id) as Record<string, unknown> | undefined;
+  if (!current) return null;
+
+  const next = {
+    status: updates.status ?? String(current.status ?? 'pending'),
+    progressPercent: updates.progressPercent ?? Number(current.progress_percent ?? 0),
+    currentStage: updates.currentStage ?? String(current.current_stage ?? 'pending'),
+    resultDeploymentId:
+      updates.resultDeploymentId === undefined
+        ? (current.result_deployment_id ?? null)
+        : updates.resultDeploymentId,
+    updatedAt: updates.updatedAt ?? new Date().toISOString(),
+  };
+
+  getDb()
+    .prepare(
+      `UPDATE deployment_runs
+       SET status = ?, progress_percent = ?, current_stage = ?, result_deployment_id = ?, updated_at = ?
+       WHERE id = ?`,
+    )
+    .run(
+      next.status,
+      next.progressPercent,
+      next.currentStage,
+      next.resultDeploymentId,
+      next.updatedAt,
+      id,
+    );
+  return getDeploymentRun(id);
+}
+
+export function getDeploymentPipelineRunEvents(deploymentRunId: string) {
+  return getDb()
+    .prepare('SELECT * FROM deployment_run_events WHERE deployment_run_id = ? ORDER BY created_at')
+    .all(deploymentRunId);
+}
+
+export function getDeploymentRunEvents(deploymentRunId: string) {
+  return getDeploymentPipelineRunEvents(deploymentRunId);
+}
+
+export function createDeploymentRunEvent(input: {
+  id?: string;
+  deploymentRunId: string;
+  stage: string;
+  detail: string;
+  progressPercent?: number;
+  createdAt?: string;
+}) {
+  const id = input.id ?? crypto.randomUUID();
+  const createdAt = input.createdAt ?? new Date().toISOString();
+  getDb()
+    .prepare(
+      `INSERT INTO deployment_run_events
+        (id, deployment_run_id, stage, detail, progress_percent, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      id,
+      input.deploymentRunId,
+      input.stage,
+      input.detail,
+      input.progressPercent ?? 0,
+      createdAt,
+    );
+  return getDeploymentPipelineRunEvents(input.deploymentRunId);
 }
 
 export function getAllJobTemplates() {

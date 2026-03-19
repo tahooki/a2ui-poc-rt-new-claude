@@ -2331,112 +2331,187 @@ export function buildDeploymentApprovalInboxCard(cardData: Record<string, unknow
 
 // ─── 8. Quick Deploy Launchpad ─────────────────────────────────────────────
 
-function normalizeLaunchpadSuggestions(source: Record<string, unknown>): Array<Record<string, unknown>> {
-  return normalizeDeploymentCandidates(source).slice(0, 3);
+function quickDeployStateLabel(state: string) {
+  switch (state) {
+    case 'ready':
+      return '이미지 준비 완료';
+    case 'artifact_ready':
+      return '이미지 준비 완료';
+    case 'building':
+      return '이미지 생성 중';
+    case 'deploying':
+      return '배포 진행 중';
+    case 'verifying':
+      return '결과 확인 중';
+    case 'succeeded':
+      return '배포 성공';
+    case 'failed':
+      return '배포 실패';
+    case 'rolled_back':
+      return '롤백 완료';
+    case 'pending':
+    default:
+      return '대기';
+  }
+}
+
+function renderQuickDeployProgressBar(percent: number) {
+  const width = 16;
+  const clamped = Math.max(0, Math.min(100, Math.round(percent)));
+  const filled = Math.max(0, Math.min(width, Math.round((clamped / 100) * width)));
+  return `[${'='.repeat(filled)}${'-'.repeat(width - filled)}] ${clamped}%`;
+}
+
+function toQuickDeployServiceSlug(serviceId: string, serviceName: string) {
+  const base = serviceId.replace(/^svc_/, '') || serviceName;
+  return base
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '') || 'service';
+}
+
+function formatQuickDeployImageTag(serviceSlug: string, sourceVersion: string, revision: number) {
+  const normalizedVersion = sourceVersion.replace(/^v/, '') || 'latest';
+  return `${serviceSlug}:${normalizedVersion}-r${revision}`;
+}
+
+function quickDeployLastEventText(runEvents: Array<Record<string, unknown>>) {
+  const lastEvent = runEvents[runEvents.length - 1];
+  if (!lastEvent) {
+    return '아직 실행 이벤트가 없습니다.';
+  }
+
+  const stage = asText(lastEvent['stage'], 'event');
+  const detail = asText(lastEvent['detail'], '');
+  return detail ? `${stage} · ${detail}` : stage;
 }
 
 export function buildQuickDeployLaunchpadCard(cardData: Record<string, unknown>): A2UICardDef {
-  const baseline = asRecord(cardData['baseline']) ?? asRecord(cardData['selectedDeployment']) ?? asRecord(cardData['deployment']);
-  const suggestions = normalizeLaunchpadSuggestions(cardData);
-  const service = pickText(
-    cardData,
-    ['service_name', 'service', 'service_id'],
-    baseline ? pickText(baseline, ['service_name', 'service', 'service_id'], '대상 서비스') : '대상 서비스',
-  );
-  const serviceId = pickText(
-    cardData,
-    ['service_id', 'serviceId'],
-    baseline ? pickText(baseline, ['service_id', 'serviceId'], service) : service,
-  );
-  const environment = pickText(
-    cardData,
-    ['environment', 'env'],
-    baseline ? pickText(baseline, ['environment', 'env'], '대상 환경') : '대상 환경',
-  );
-  const baselineVersion = pickText(
-    cardData,
-    ['baselineVersion', 'baseline_version', 'version', 'current_version'],
-    baseline ? pickText(baseline, ['version', 'current_version', 'baseline_version'], 'N/A') : 'N/A',
-  );
-  const lastSuccessfulAt = pickText(
-    cardData,
-    ['lastSuccessfulDeployAt', 'last_successful_deploy_at', 'last_deployed_at', 'last_success_at'],
-    baseline ? pickText(baseline, ['deployed_at', 'updated_at', 'created_at', 'completed_at'], 'N/A') : 'N/A',
-  );
-  const rolloutStrategy = pickText(
-    cardData,
-    ['rolloutStrategy', 'rollout_strategy', 'strategy'],
-    baseline ? pickText(baseline, ['rollout_strategy', 'strategy'], 'canary 10 -> 50 -> 100') : 'canary 10 -> 50 -> 100',
-  );
-  const requestedBy = pickText(
-    cardData,
-    ['requestedBy', 'requested_by', 'requestor'],
-    baseline ? pickText(baseline, ['requested_by', 'requestor', 'requestedBy'], '현재 사용자') : '현재 사용자',
-  );
-  const risk = normalizeRiskSummary(
-    baseline ? { ...baseline, ...cardData } : cardData,
-  );
-  const baselineStatus = pickText(
-    cardData,
-    ['baselineStatus', 'baseline_status', 'status'],
-    baseline ? pickText(baseline, ['status', 'state'], 'succeeded') : 'suggested',
-  );
-  const state = pickText(
-    cardData,
-    ['state'],
-    baseline ? pickText(baseline, ['state'], 'suggested') : 'suggested',
-  );
-  const approvalRequired = pickBool(
-    baseline ? { ...baseline, ...cardData } : cardData,
-    ['approvalRequired', 'approval_required'],
-    false,
-  );
-  const canImmediateStart = pickBool(
-    baseline ? { ...baseline, ...cardData } : cardData,
-    ['canImmediateStart', 'can_start_now'],
-    false,
-  );
-  const baselineReady = ['succeeded', 'success', 'done', 'completed', 'approved'].includes(baselineStatus);
-  const showImmediateStart = canImmediateStart && baselineReady && risk.failCount === 0 && !approvalRequired;
-  const showSuggestions = suggestions.length > 1 || !baseline || baselineVersion === 'N/A';
-  const summary = baseline
-    ? '여러 페이지를 거치던 배포 시작을 2단계 카드 흐름으로 압축했습니다.'
-    : '기준 배포를 찾지 못해 먼저 후보를 고르는 단계가 필요합니다.';
-  const statusText = renderQueueState(state);
-  const step1State =
-    state === 'draft_created' || state === 'approval_requested' || state === 'started'
-      ? 'completed'
-      : baseline
-        ? 'active'
-        : 'blocked';
-  const step2State =
-    state === 'started' || state === 'approval_requested'
-      ? 'completed'
-      : state === 'draft_created'
-        ? 'active'
-        : 'blocked';
-  const step1Badge =
-    step1State === 'completed' ? 'Step 1 완료' : step1State === 'active' ? 'Step 1 진행 중' : 'Step 1 대기';
-  const step2Badge =
-    step2State === 'completed' ? 'Step 2 완료' : step2State === 'active' ? 'Step 2 진행 중' : 'Step 2 대기';
-  const flowSummary =
-    step2State === 'completed'
-      ? state === 'started'
-        ? '배포가 시작된 상태입니다.'
-        : '승인 요청이 생성된 상태입니다.'
-      : step2State === 'active'
-        ? '초안 생성이 끝나서 실행 단계로 넘어갈 수 있습니다.'
-        : '먼저 기준 배포를 확인하고 초안을 생성해야 합니다.';
+  const baseline =
+    asRecord(cardData['baseline']) ??
+    asRecord(cardData['pipeline']) ??
+    asRecord(cardData['deployment']);
+  const artifact =
+    asRecord(cardData['artifact']) ?? asRecord(baseline ? baseline['artifact'] : null);
+  const deployRun =
+    asRecord(cardData['deployRun']) ?? asRecord(baseline ? baseline['deployRun'] : null);
+  const runEvents = asRecordList(cardData['runEvents'] ?? cardData['events']);
 
-  const titleIcon = baseline ? 'rocket_launch' : 'travel_explore';
+  if (!baseline) {
+    return {
+      root: 'root_card',
+      components: [
+        mkText('launch_empty_title', '기준 배포를 찾을 수 없습니다.', 'h2'),
+        mkText('launch_empty_detail', 'quick deploy 카드를 렌더링하려면 baseline deployment가 필요합니다.', 'caption'),
+        mkCard('root_card', 'launch_empty_col'),
+        mkCol('launch_empty_col', ['launch_empty_title', 'launch_empty_detail']),
+      ],
+      data: {},
+    };
+  }
+
+  const serviceName = pickText(
+    baseline,
+    ['serviceName', 'service_name', 'service'],
+    '대상 서비스',
+  );
+  const serviceId = pickText(baseline, ['serviceId', 'service_id'], serviceName);
+  const environment = pickText(baseline, ['environment', 'env'], 'production');
+  const sourceDeploymentId = pickText(
+    baseline,
+    ['sourceDeploymentId', 'source_deployment_id', 'baseline_deployment_id', 'id'],
+    '',
+  );
+  const sourceVersion = pickText(
+    baseline,
+    ['sourceVersion', 'source_version', 'baseline_version', 'version'],
+    'latest',
+  );
+  const strategy = pickText(
+    baseline,
+    ['strategy', 'suggested_strategy'],
+    'canary_10_50_100',
+  );
+  const artifactStatus = pickText(artifact ?? {}, ['status', 'state'], 'pending');
+  const artifactId = pickText(artifact ?? baseline, ['id', 'latest_artifact_id'], '');
+  const imageTag = pickText(
+    artifact ?? {},
+    ['imageTag', 'image_tag'],
+    formatQuickDeployImageTag(
+      toQuickDeployServiceSlug(serviceId, serviceName),
+      sourceVersion,
+      1,
+    ),
+  );
+  const imageUri = pickText(
+    artifact ?? {},
+    ['imageUri', 'image_uri'],
+    `registry.local/${imageTag}`,
+  );
+  const deployRunId = pickText(deployRun ?? baseline, ['id', 'latest_run_id'], '');
+  const runStatus = pickText(deployRun ?? {}, ['status'], artifactStatus === 'ready' ? 'pending' : 'pending');
+  const progressPercent = Number(
+    deployRun?.['progressPercent'] ??
+      deployRun?.['progress_percent'] ??
+      baseline['progress_percent'] ??
+      (artifactStatus === 'ready' ? 20 : 0),
+  );
+  const currentStage = pickText(
+    deployRun ?? baseline,
+    ['currentStage', 'current_stage'],
+    artifactStatus === 'ready' ? 'artifact_ready' : 'pending',
+  );
+  const resultDeploymentId = pickText(
+    deployRun ?? baseline,
+    ['resultDeploymentId', 'result_deployment_id'],
+    '',
+  );
+  const state =
+    runStatus === 'succeeded'
+      ? 'succeeded'
+      : ['failed', 'rolled_back'].includes(runStatus)
+        ? 'failed'
+        : ['deploying', 'verifying'].includes(runStatus)
+          ? 'deploying'
+          : artifactStatus === 'ready'
+            ? 'artifact_ready'
+            : artifactStatus === 'building'
+              ? 'building'
+              : 'pending';
+  const lastMessage = pickText(
+    deployRun ?? baseline,
+    ['last_message', 'message'],
+    runEvents.length > 0
+      ? quickDeployLastEventText(runEvents)
+      : state === 'pending'
+        ? '아직 배포 실행 전입니다.'
+        : state === 'artifact_ready'
+          ? '이미지가 준비되었습니다.'
+          : '배포 파이프라인을 진행 중입니다.',
+  );
+  const progressText = renderQuickDeployProgressBar(progressPercent);
+  const progressSummary = `${quickDeployStateLabel(state)} · ${lastMessage}`;
+  const rollbackReady = ['failed', 'rolled_back'].includes(state);
+  const stateForIcon = String(state);
+  const step1ActionText = artifactStatus === 'ready' ? '이미지 재생성' : '이미지 생성';
+  const step2ActionText = runStatus === 'deploying' || runStatus === 'verifying'
+    ? '배포 진행 중'
+    : '배포 시작';
+
   const headerComponents: A2UIComponent[] = [
-    mkIcon('launch_icon', titleIcon),
-    mkText('launch_eyebrow', 'A2UI · 간단 배포 시작', 'caption'),
-    mkText('launch_title', '새 배포 시작', 'h2'),
-    mkText('launch_summary', summary, 'caption'),
-    mkText('launch_status', `${statusText} · 요청자 ${requestedBy}`, 'caption'),
-    mkText('launch_flow_title', '배포 시작 플로우', 'h4'),
-    mkText('launch_flow_detail', flowSummary, 'caption'),
+    mkIcon('launch_icon', 'rocket_launch'),
+    mkText('launch_eyebrow', 'A2UI · quick deploy pipeline', 'caption'),
+    mkText('launch_title', '이미지 생성 → 배포 실행 → 결과 확인', 'h2'),
+    mkText(
+      'launch_summary',
+      `${serviceName} · ${environment} · 기준 ${sourceVersion}`,
+      'caption',
+    ),
+    mkText(
+      'launch_status',
+      `${quickDeployStateLabel(state)} · ${progressPercent}% · ${quickDeployLastEventText(runEvents)}`,
+      'caption',
+    ),
     mkDivider('launch_div_top'),
     mkCol('launch_header_col', [
       'launch_icon',
@@ -2444,268 +2519,287 @@ export function buildQuickDeployLaunchpadCard(cardData: Record<string, unknown>)
       'launch_title',
       'launch_summary',
       'launch_status',
-      'launch_flow_title',
-      'launch_flow_detail',
       'launch_div_top',
     ]),
   ];
 
-  const launchRows = [
-    mkInfoRow('launch_svc', 'dns', '서비스', { kind: 'text', text: service }),
-    mkInfoRow('launch_env', 'cloud', '환경', { kind: 'text', text: environment }),
-    mkInfoRow('launch_ver', 'tag', '기준 버전', { kind: 'text', text: baselineVersion }),
-    mkInfoRow('launch_time', 'schedule', '최근 성공 배포', { kind: 'text', text: lastSuccessfulAt }),
-    mkInfoRow('launch_strat', 'speed', '전략', { kind: 'text', text: rolloutStrategy }),
-    mkInfoRow('launch_risk', statusIcon(risk.failCount > 0 ? 'fail' : risk.warnCount > 0 ? 'warn' : 'pass'), '최근 체크', {
+  const step1Rows = [
+    mkInfoRow('launch_step_1_base', 'dns', '기준 배포', {
       kind: 'text',
-      text: risk.text,
+      text: sourceDeploymentId || serviceId,
     }),
-    mkInfoRow('launch_req', 'person', '요청자', { kind: 'text', text: requestedBy }),
+    mkInfoRow('launch_step_1_img', 'tag', '이미지 태그', {
+      kind: 'text',
+      text: imageTag,
+    }),
+    mkInfoRow(
+      'launch_step_1_status',
+      statusIcon(artifactStatus === 'ready' ? 'succeeded' : artifactStatus === 'building' ? 'running' : artifactStatus),
+      'build 상태',
+    {
+      kind: 'text',
+      text: quickDeployStateLabel(artifactStatus),
+    }),
   ];
 
-  const launchRowsCol = mkCol('launch_rows_col', launchRows.map((row) => row.rowId));
-  const launchRowComponents = launchRows.flatMap((row) => row.components);
-
-  const stepComponents: A2UIComponent[] = [];
-  const stepCardIds: string[] = [];
-
-  if (baseline && baselineVersion !== 'N/A') {
-    stepComponents.push(
-      mkText('launch_step_1_label', step1Badge, 'caption'),
-      mkText('launch_step_1_title', '기준 배포 확인 및 초안 생성', 'h3'),
-      mkText(
-        'launch_step_1_detail',
-        step1State === 'completed'
-          ? '기준 배포와 기본 전략이 확정되었고 초안 생성 단계가 완료되었습니다.'
-          : '기준 배포, 환경, 전략을 확인한 뒤 배포 초안을 생성합니다.',
-        'caption',
-      ),
-      launchRowsCol,
-      mkText('launch_step_1_action_text', step1State === 'completed' ? '초안 생성됨' : '초안 생성'),
-      mkButton(
-        'launch_step_1_action_btn',
-        'launch_step_1_action_text',
-        'create_deploy_draft',
-        {
-          baselineDeploymentId: pickText(baseline ?? {}, ['baseline_deployment_id', 'id', 'deployment_id'], ''),
-          serviceId,
-          environment,
-          version: baselineVersion,
-          strategy: rolloutStrategy,
-        },
-        step1State !== 'completed',
-      ),
-      mkCol('launch_step_1_col', [
-        'launch_step_1_label',
-        'launch_step_1_title',
-        'launch_step_1_detail',
-        'launch_rows_col',
-        'launch_step_1_action_btn',
-      ]),
-      mkCard('launch_step_1_card', 'launch_step_1_col'),
-    );
-    stepCardIds.push('launch_step_1_card');
-
-    const step2ActionIds: string[] = [];
-    stepComponents.push(
-      mkText('launch_step_2_label', step2State === 'completed' ? 'Step 2 완료' : 'Step 2'),
-      mkText('launch_step_2_title', '승인 요청 또는 바로 시작', 'h3'),
-      mkText(
-        'launch_step_2_detail',
-        step2State === 'blocked'
-          ? '초안이 생성되면 승인 요청 또는 즉시 시작 단계로 이어집니다.'
-          : showImmediateStart
-            ? '초안이 준비되었습니다. 승인 요청을 보내거나 바로 배포를 시작할 수 있습니다.'
-            : '초안이 준비되었습니다. 승인 요청을 보내 다음 단계로 진행합니다.',
-        'caption',
-      ),
-    );
-
-    if (step2State !== 'blocked') {
-      stepComponents.push(
-        mkText('launch_step_2_approve_text', state === 'approval_requested' ? '승인 요청됨' : '승인 요청'),
-        mkButton(
-          'launch_step_2_approve_btn',
-          'launch_step_2_approve_text',
-          'request_deploy_approval',
-          {
-            baselineDeploymentId: pickText(baseline ?? {}, ['baseline_deployment_id', 'id', 'deployment_id'], ''),
-            serviceId,
-            environment,
-            version: baselineVersion,
-            strategy: rolloutStrategy,
-          },
-          !showImmediateStart || state === 'approval_requested',
-        ),
-      );
-      step2ActionIds.push('launch_step_2_approve_btn');
-
-      if (showImmediateStart) {
-        stepComponents.push(
-          mkText('launch_step_2_start_text', state === 'started' ? '배포 시작됨' : '즉시 시작'),
-          mkButton(
-            'launch_step_2_start_btn',
-            'launch_step_2_start_text',
-            'start_quick_deploy',
-            {
-              baselineDeploymentId: pickText(baseline ?? {}, ['baseline_deployment_id', 'id', 'deployment_id'], ''),
-              serviceId,
-              environment,
-              version: baselineVersion,
-              strategy: rolloutStrategy,
-            },
-            state !== 'started',
-          ),
-        );
-        step2ActionIds.push('launch_step_2_start_btn');
-      }
-    }
-
-    stepComponents.push(
-      mkText('launch_step_2_detail_text', '상세 설정으로 이동'),
-      mkButton('launch_step_2_detail_btn', 'launch_step_2_detail_text', 'open_deployments_page', {
+  const step1Components: A2UIComponent[] = [
+    mkText('launch_step_1_label', 'Step 1', 'caption'),
+    mkText('launch_step_1_title', '이미지 생성', 'h3'),
+    mkText(
+      'launch_step_1_detail',
+      '기준 배포를 바탕으로 배포 가능한 이미지를 만든 뒤 다음 단계에서 바로 사용합니다.',
+      'caption',
+    ),
+    ...step1Rows.flatMap((row) => row.components),
+    mkText('launch_step_1_uri_label', '이미지 URI', 'caption'),
+    mkText('launch_step_1_uri', imageUri, 'body'),
+    mkText('launch_step_1_action_text', step1ActionText),
+    mkButton(
+      'launch_step_1_action_btn',
+      'launch_step_1_action_text',
+      'build_deploy_artifact',
+      {
+        baselineDeploymentId: sourceDeploymentId,
+        deploymentId: sourceDeploymentId,
         serviceId,
         environment,
-        version: baselineVersion,
-        view: 'deployment_details',
-      }),
-      mkRow('launch_step_2_actions', [...step2ActionIds, 'launch_step_2_detail_btn'], 'end'),
-      mkCol('launch_step_2_col', [
-        'launch_step_2_label',
-        'launch_step_2_title',
-        'launch_step_2_detail',
-        'launch_step_2_actions',
-      ]),
-      mkCard('launch_step_2_card', 'launch_step_2_col'),
-    );
-    stepCardIds.push('launch_step_2_card');
-  }
+        sourceVersion,
+      },
+      artifactStatus === 'ready',
+    ),
+    mkCol('launch_step_1_col', [
+      'launch_step_1_label',
+      'launch_step_1_title',
+      'launch_step_1_detail',
+      ...step1Rows.map((row) => row.rowId),
+      'launch_step_1_uri_label',
+      'launch_step_1_uri',
+      'launch_step_1_action_btn',
+    ]),
+    mkCard('launch_step_1_card', 'launch_step_1_col'),
+  ];
 
-  const suggestionComponents: A2UIComponent[] = [];
-  const suggestionRowIds: string[] = [];
-  if (showSuggestions) {
-    suggestionComponents.push(
-      mkDivider('launch_sugg_div'),
-      mkText('launch_sugg_title', '추천 기준 배포', 'h3'),
-      mkText('launch_sugg_detail', '기준값이 비어 있어 최근 성공 배포 후보를 먼저 확인하세요.', 'caption'),
-    );
+  const step2Rows = [
+    mkInfoRow('launch_step_2_artifact', 'smart_toy', '사용할 이미지', {
+      kind: 'text',
+      text: imageTag,
+    }),
+    mkInfoRow('launch_step_2_strategy', 'speed', '배포 전략', {
+      kind: 'text',
+      text: strategy,
+    }),
+    mkInfoRow(
+      'launch_step_2_status',
+      statusIcon(runStatus === 'deploying' || runStatus === 'verifying' ? 'running' : runStatus),
+      'run 상태',
+    {
+      kind: 'text',
+      text: quickDeployStateLabel(runStatus),
+    }),
+  ];
 
-    suggestions.forEach((candidate, index) => {
-      const candidateId = asText(candidate['id'] ?? candidate['deployment_id'] ?? `suggestion-${index}`);
-      const candidateService = pickText(candidate, ['service_name', 'service', 'service_id'], service);
-      const candidateEnv = pickText(candidate, ['environment', 'env'], environment);
-      const candidateVersion = pickText(candidate, ['version', 'current_version', 'baseline_version'], 'N/A');
-      const candidateTime = pickText(candidate, ['deployed_at', 'completed_at', 'updated_at', 'created_at'], 'N/A');
-      const candidateStatus = pickText(candidate, ['status', 'state'], 'succeeded');
-      const suggestionHeaderId = `launch_sugg_${index}_header`;
-      const suggestionMetaId = `launch_sugg_${index}_meta`;
-      const suggestionActionId = `launch_sugg_${index}_action`;
-      const suggestionCardId = `launch_sugg_${index}_card`;
-      const suggestionColId = `launch_sugg_${index}_col`;
+  const step2Components: A2UIComponent[] = [
+    mkText('launch_step_2_label', 'Step 2', 'caption'),
+    mkText('launch_step_2_title', '배포 실행', 'h3'),
+    mkText(
+      'launch_step_2_detail',
+      '이미지가 준비되면 즉시 배포를 시작합니다. 승인 단계는 이 카드에서 제외됩니다.',
+      'caption',
+    ),
+    ...step2Rows.flatMap((row) => row.components),
+    mkText('launch_step_2_action_text', step2ActionText),
+    mkButton(
+      'launch_step_2_action_btn',
+      'launch_step_2_action_text',
+      'start_deploy_run',
+      {
+        artifactId,
+        baselineDeploymentId: sourceDeploymentId,
+        deploymentId: sourceDeploymentId,
+        serviceId,
+        environment,
+        strategy,
+      },
+      runStatus === 'deploying' || runStatus === 'verifying',
+    ),
+    mkCol('launch_step_2_col', [
+      'launch_step_2_label',
+      'launch_step_2_title',
+      'launch_step_2_detail',
+      ...step2Rows.map((row) => row.rowId),
+      'launch_step_2_action_btn',
+    ]),
+    mkCard('launch_step_2_card', 'launch_step_2_col'),
+  ];
 
-      suggestionComponents.push(
-        mkIcon(`launch_sugg_${index}_icon`, statusIcon(candidateStatus)),
-        mkText(`launch_sugg_${index}_title`, `${candidateService} · ${candidateEnv} · ${candidateVersion}`, 'h4'),
-        mkText(suggestionMetaId, `최근 성공 배포 ${candidateTime}`, 'caption'),
-        mkText(`launch_sugg_${index}_status`, statusLabel(candidateStatus), 'caption'),
-        mkRow(suggestionHeaderId, [`launch_sugg_${index}_icon`, `launch_sugg_${index}_title`, `launch_sugg_${index}_status`], 'spaceBetween'),
-        mkText(`launch_sugg_${index}_text`, '이 항목을 기준 배포로 사용할 수 있습니다.', 'caption'),
-        mkText(`launch_sugg_${index}_select_text`, '선택'),
-        mkButton(
-          `launch_sugg_${index}_select_btn`,
-          `launch_sugg_${index}_select_text`,
-          'select_deploy_baseline',
-          {
-            candidateId,
-            deploymentId: candidateId,
-            serviceId: candidateService,
-            environment: candidateEnv,
-            version: candidateVersion,
-          },
-          true,
-        ),
-        mkRow(suggestionActionId, [`launch_sugg_${index}_select_btn`], 'end'),
-        mkCol(suggestionColId, [
-          suggestionHeaderId,
-          suggestionMetaId,
-          `launch_sugg_${index}_text`,
-          suggestionActionId,
-        ]),
-        mkCard(suggestionCardId, suggestionColId),
+  const eventRows: A2UIComponent[] = [];
+  const eventRowIds: string[] = [];
+  const recentRunEvents = [...runEvents].slice(-3).reverse();
+
+  if (recentRunEvents.length === 0) {
+    eventRows.push(mkText('launch_step_3_empty', '아직 실행 이벤트가 없습니다.', 'caption'));
+    eventRowIds.push('launch_step_3_empty');
+  } else {
+    recentRunEvents.forEach((event, index) => {
+      const rowId = `launch_step_3_event_row_${index}`;
+      const stage = asText(event['stage'], 'event');
+      const detail = asText(event['detail'], '');
+      eventRows.push(
+        mkIcon(`launch_step_3_event_icon_${index}`, statusIcon(stage)),
+        mkText(`launch_step_3_event_stage_${index}`, stage, 'caption'),
+        mkText(`launch_step_3_event_detail_${index}`, detail || '-', 'body'),
+        mkRow(rowId, [
+          `launch_step_3_event_icon_${index}`,
+          `launch_step_3_event_stage_${index}`,
+          `launch_step_3_event_detail_${index}`,
+        ], 'spaceBetween'),
       );
-      suggestionRowIds.push(suggestionCardId);
+      eventRowIds.push(rowId);
     });
   }
 
-  const emptyComponents: A2UIComponent[] = [];
-  let emptyColId = '';
-  if (!baseline && suggestions.length === 0) {
-    emptyColId = 'launch_empty_col';
-    emptyComponents.push(
-      mkIcon('launch_empty_icon', 'info'),
-      mkText('launch_empty_title', '배포 기준을 찾지 못했습니다.', 'h4'),
-      mkText('launch_empty_detail', '최근 성공 배포 정보가 없어 새 배포 초안을 만들기 전에 배포 페이지에서 기준을 확인하세요.', 'caption'),
-      mkText('launch_empty_action_text', '배포 페이지로 이동'),
-      mkButton(
-        'launch_empty_action_btn',
-        'launch_empty_action_text',
-        'open_deployments_page',
-        { view: 'deployment_launchpad', scope: 'latest-success' },
-        true,
-      ),
-      mkCol(emptyColId, ['launch_empty_icon', 'launch_empty_title', 'launch_empty_detail', 'launch_empty_action_btn']),
-    );
+  const step3ActionIds: string[] = [];
+  step3ActionIds.push('launch_step_3_detail_btn', 'launch_step_3_refresh_btn');
+  if (rollbackReady) {
+    step3ActionIds.push('launch_step_3_rollback_btn');
   }
 
-  const actionComponents: A2UIComponent[] = [];
-  if (!baseline && suggestions.length > 0) {
-    actionComponents.push(
-      mkText('launch_go_text', '배포 페이지로 이동'),
-      mkButton('launch_go_btn', 'launch_go_text', 'open_deployments_page', {
-        view: 'deployment_launchpad',
-        scope: 'suggestions',
-      }, true),
-    );
-  }
+  const step3Components: A2UIComponent[] = [
+    mkText('launch_step_3_label', 'Step 3', 'caption'),
+    mkText('launch_step_3_title', '결과 확인', 'h3'),
+    mkText(
+      'launch_step_3_detail',
+      rollbackReady
+        ? '배포가 실패했습니다. 롤백 후보를 바로 확인할 수 있습니다.'
+        : '실행 진행률과 최근 이벤트를 보고 다음 상태 전이를 확인합니다.',
+      'caption',
+    ),
+    mkText('launch_step_3_progress_label', '진행률', 'caption'),
+    mkText('launch_step_3_progress_bar', progressText, 'body'),
+    mkText('launch_step_3_progress_summary', progressSummary, 'caption'),
+    ...mkInfoRow('launch_step_3_state', statusIcon(stateForIcon === 'deploying' || stateForIcon === 'verifying' ? 'running' : stateForIcon), '결과', {
+      kind: 'text',
+      text: quickDeployStateLabel(state),
+    }).components,
+    ...mkInfoRow('launch_step_3_stage', 'route', '현재 단계', {
+      kind: 'text',
+      text: currentStage,
+    }).components,
+    ...mkInfoRow('launch_step_3_last', 'history', '최근 메시지', {
+      kind: 'text',
+      text: lastMessage,
+    }).components,
+    mkDivider('launch_step_3_div_events'),
+    mkText('launch_step_3_events_title', '최근 이벤트', 'h4'),
+    ...eventRows,
+    mkText('launch_step_3_detail_text', '상세 보기'),
+    mkButton(
+      'launch_step_3_detail_btn',
+      'launch_step_3_detail_text',
+      'open_deployments_page',
+      {
+        deploymentId: resultDeploymentId || sourceDeploymentId,
+        deployRunId,
+        serviceId,
+        environment,
+        view: 'quick_deploy_result',
+      },
+    ),
+    mkText('launch_step_3_refresh_text', '상태 갱신'),
+    mkButton(
+      'launch_step_3_refresh_btn',
+      'launch_step_3_refresh_text',
+      'refresh_deploy_status',
+      {
+        deployRunId,
+        deploymentId: resultDeploymentId || sourceDeploymentId,
+        serviceId,
+        environment,
+      },
+      true,
+    ),
+    ...(rollbackReady
+      ? [
+          mkText('launch_step_3_rollback_text', '롤백 후보 보기'),
+          mkButton(
+            'launch_step_3_rollback_btn',
+            'launch_step_3_rollback_text',
+            'open_rollback_candidates',
+            {
+              deploymentId: resultDeploymentId || sourceDeploymentId,
+              deployRunId,
+              serviceId,
+              environment,
+            },
+          ),
+        ]
+      : []),
+    mkRow('launch_step_3_actions', step3ActionIds, 'end'),
+    mkCol('launch_step_3_col', [
+      'launch_step_3_label',
+      'launch_step_3_title',
+      'launch_step_3_detail',
+      'launch_step_3_progress_label',
+      'launch_step_3_progress_bar',
+      'launch_step_3_progress_summary',
+      'launch_step_3_state_row',
+      'launch_step_3_stage_row',
+      'launch_step_3_last_row',
+      'launch_step_3_div_events',
+      'launch_step_3_events_title',
+      ...eventRowIds,
+      'launch_step_3_actions',
+    ]),
+    mkCard('launch_step_3_card', 'launch_step_3_col'),
+  ];
 
   const components: A2UIComponent[] = [
     ...headerComponents,
-    ...launchRowComponents,
-    ...stepComponents,
-    ...suggestionComponents,
-    ...emptyComponents,
-    ...actionComponents,
-    ...(suggestionRowIds.length > 0 ? [mkList('launch_sugg_list', suggestionRowIds, 'vertical')] : []),
-    ...(stepCardIds.length > 0 ? [mkList('launch_steps_list', stepCardIds, 'vertical')] : []),
-    mkCol('main_col', [
+    ...step1Components,
+    ...step2Components,
+    ...step3Components,
+    mkList('launch_steps_list', ['launch_step_1_card', 'launch_step_2_card', 'launch_step_3_card'], 'vertical'),
+    mkCol('launch_main_col', [
       'launch_header_col',
-      ...(stepCardIds.length > 0 ? ['launch_steps_list'] : []),
-      ...(suggestionRowIds.length > 0 ? ['launch_sugg_div', 'launch_sugg_title', 'launch_sugg_detail', 'launch_sugg_list'] : []),
-      ...(emptyColId ? ['launch_empty_col'] : []),
-      ...(!baseline && suggestions.length > 0 ? ['launch_go_btn'] : []),
+      'launch_steps_list',
     ]),
-    mkCard('root_card', 'main_col'),
+    mkCard('root_card', 'launch_main_col'),
   ];
 
   return {
     root: 'root_card',
     components,
     data: {
-      launchpad: {
-        state,
-        service,
+      pipeline: {
+        serviceId,
+        serviceName,
         environment,
-        baselineVersion,
-        lastSuccessfulAt,
-        rolloutStrategy,
-        requestedBy,
-        riskSummary: risk.text,
+        sourceDeploymentId,
+        sourceVersion,
+        strategy,
+        state,
+        progressPercent,
+        currentStage,
+        lastMessage,
       },
-      suggestions: suggestions.map((candidate) => ({
-        id: candidate['id'] ?? candidate['deployment_id'] ?? '',
-        service_id: pickText(candidate, ['service_id', 'serviceId'], serviceId),
-        environment: pickText(candidate, ['environment', 'env'], environment),
-        version: pickText(candidate, ['version', 'current_version', 'baseline_version'], 'N/A'),
+      artifact: {
+        id: artifactId || null,
+        imageTag,
+        imageUri,
+        status: artifactStatus,
+      },
+      deployRun: {
+        id: deployRunId || null,
+        status: runStatus,
+        progressPercent,
+        currentStage,
+        lastMessage,
+        resultDeploymentId: resultDeploymentId || null,
+      },
+      runEvents: runEvents.map((event) => ({
+        stage: asText(event['stage'], 'event'),
+        detail: asText(event['detail'], ''),
+        progressPercent: Number(event['progress_percent'] ?? event['progressPercent'] ?? 0),
       })),
     },
   };
