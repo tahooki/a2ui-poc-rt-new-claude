@@ -116,6 +116,104 @@ export function seed(db: Database.Database): void {
     updated_at: '2026-03-08T10:30:00Z',
   });
 
+  insertDeployment.run({
+    id: 'dep_checkout_prod_40',
+    service_id: 'svc_checkout',
+    environment: 'production',
+    version: 'v2.3.7',
+    previous_version: 'v2.3.6',
+    status: 'succeeded',
+    rollout_percent: 100,
+    deployed_by: 'op_seungho_park',
+    created_at: '2026-03-05T08:00:00Z',
+    updated_at: '2026-03-05T08:26:00Z',
+  });
+
+  insertDeployment.run({
+    id: 'dep_checkout_prod_39',
+    service_id: 'svc_checkout',
+    environment: 'production',
+    version: 'v2.3.6',
+    previous_version: 'v2.3.5',
+    status: 'succeeded',
+    rollout_percent: 100,
+    deployed_by: 'op_seungho_park',
+    created_at: '2026-03-01T07:30:00Z',
+    updated_at: '2026-03-01T08:02:00Z',
+  });
+
+  // ─── Deployment Requests ──────────────────────────────────────────────────
+  const insertDeploymentRequest = db.prepare(`
+    INSERT OR IGNORE INTO deployment_requests
+      (id, service_id, environment, baseline_deployment_id, target_version, strategy, status, requested_by, approved_by, note, result_deployment_id, created_at, updated_at)
+    VALUES
+      (@id, @service_id, @environment, @baseline_deployment_id, @target_version, @strategy, @status, @requested_by, @approved_by, @note, @result_deployment_id, @created_at, @updated_at)
+  `);
+
+  insertDeploymentRequest.run({
+    id: 'dpr_checkout_prod_43',
+    service_id: 'svc_checkout',
+    environment: 'production',
+    baseline_deployment_id: 'dep_checkout_prod_41',
+    target_version: 'v2.3.8',
+    strategy: 'canary_10_50_100',
+    status: 'approval_requested',
+    requested_by: 'op_seungho_park',
+    approved_by: null,
+    note: '장애 수습 이후 안정 버전 기준으로 재배포 예정',
+    result_deployment_id: null,
+    created_at: '2026-03-10T03:18:00Z',
+    updated_at: '2026-03-10T03:18:00Z',
+  });
+
+  insertDeploymentRequest.run({
+    id: 'dpr_checkout_prod_44',
+    service_id: 'svc_checkout',
+    environment: 'production',
+    baseline_deployment_id: 'dep_checkout_prod_41',
+    target_version: 'v2.3.8',
+    strategy: 'canary_10_50_100',
+    status: 'approval_requested',
+    requested_by: 'op_jungsoo_kim',
+    approved_by: null,
+    note: '5xx 안정화 이후 checkout 재배포 요청',
+    result_deployment_id: null,
+    created_at: '2026-03-10T03:21:00Z',
+    updated_at: '2026-03-10T03:21:00Z',
+  });
+
+  insertDeploymentRequest.run({
+    id: 'dpr_checkout_prod_45',
+    service_id: 'svc_checkout',
+    environment: 'production',
+    baseline_deployment_id: 'dep_checkout_prod_40',
+    target_version: 'v2.3.7',
+    strategy: 'canary_10_50_100',
+    status: 'approval_requested',
+    requested_by: 'op_seungho_park',
+    approved_by: null,
+    note: '직전 안정 버전 기준으로 비교 재배포 준비',
+    result_deployment_id: null,
+    created_at: '2026-03-10T03:24:00Z',
+    updated_at: '2026-03-10T03:24:00Z',
+  });
+
+  insertDeploymentRequest.run({
+    id: 'dpr_checkout_prod_46',
+    service_id: 'svc_checkout',
+    environment: 'production',
+    baseline_deployment_id: 'dep_checkout_prod_39',
+    target_version: 'v2.3.6',
+    strategy: 'canary_10_50_100',
+    status: 'approval_requested',
+    requested_by: 'op_yuna_choi',
+    approved_by: null,
+    note: '고객 영향 최소화를 위한 추가 승인 대기 요청',
+    result_deployment_id: null,
+    created_at: '2026-03-10T03:28:00Z',
+    updated_at: '2026-03-10T03:28:00Z',
+  });
+
   // ─── Deployment Diffs ─────────────────────────────────────────────────────
   const insertDiff = db.prepare(`
     INSERT OR IGNORE INTO deployment_diffs

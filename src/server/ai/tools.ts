@@ -824,6 +824,61 @@ export const renderRollbackCard = tool({
   },
 });
 
+// ─── renderRollbackActionCard ───
+
+export const renderRollbackActionCard = tool({
+  description:
+    '롤백 가능한 배포 후보를 목록 형태의 A2UI 카드로 렌더링합니다. 최근 배포, 위험 신호, 롤백 가능 여부를 함께 보여주고 후보별 상세 열람/실행 액션을 제공합니다.',
+  inputSchema: z.object({
+    deploymentId: z.string().describe('롤백 후보 카드를 렌더링할 기준 배포의 ID. latest, recent_deployment 같은 별칭도 허용'),
+  }),
+  execute: async ({ deploymentId }: { deploymentId: string }) => {
+    const resolvedDeploymentId = resolveDeploymentReference(deploymentId);
+    return await renderBoundTemplate({
+      templateId: 'tpl_rollback_action',
+      args: {
+        deploymentId: resolvedDeploymentId,
+      },
+      missingLabel: '롤백 실행 후보 템플릿',
+    });
+  },
+});
+
+// ─── renderDeploymentApprovalInboxCard ───
+
+export const renderDeploymentApprovalInboxCard = tool({
+  description:
+    '승인 대기 중인 배포 요청을 inbox 형태의 A2UI 카드로 렌더링합니다. 요청별 승인/보류/상세 열람 액션을 제공합니다.',
+  inputSchema: z.object({}),
+  execute: async () => {
+    return await renderBoundTemplate({
+      templateId: 'tpl_deployment_approval_inbox',
+      args: {},
+      missingLabel: '배포 승인 Inbox 템플릿',
+    });
+  },
+});
+
+// ─── renderQuickDeployLaunchpadCard ───
+
+export const renderQuickDeployLaunchpadCard = tool({
+  description:
+    '기존 성공 배포를 기준으로 새 배포를 빠르게 시작하는 A2UI 카드를 렌더링합니다. 기본값을 자동 채운 뒤 초안/승인요청/즉시시작 액션을 제공합니다.',
+  inputSchema: z.object({
+    deploymentId: z.string().describe('빠른 배포 카드를 렌더링할 기준 배포의 ID. latest, recent_deployment 같은 별칭도 허용'),
+  }),
+  execute: async ({ deploymentId }: { deploymentId: string }) => {
+    const resolvedDeploymentId = resolveDeploymentReference(deploymentId);
+    return await renderBoundTemplate({
+      templateId: 'tpl_quick_deploy_launchpad',
+      args: {
+        deploymentId: resolvedDeploymentId,
+      },
+      missingLabel: '간단 배포 시작 템플릿',
+    });
+  },
+});
+
 // ─── renderEvidenceCard ───
 
 export const renderEvidenceCard = tool({
@@ -957,6 +1012,9 @@ export const aiTools = {
   getServiceStatus,
   analyzeIncident,
   renderRollbackCard,
+  renderRollbackActionCard,
+  renderDeploymentApprovalInboxCard,
+  renderQuickDeployLaunchpadCard,
   renderEvidenceCard,
   renderDryRunStepperCard,
   renderConfirmCard,

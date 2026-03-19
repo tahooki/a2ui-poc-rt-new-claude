@@ -110,6 +110,29 @@ export interface RollbackStep {
   detail: string;
 }
 
+export type DeploymentRequestStatus =
+  | 'draft'
+  | 'approval_requested'
+  | 'held'
+  | 'started'
+  | 'failed';
+
+export interface DeploymentRequest {
+  id: string;
+  serviceId: string;
+  environment: 'production' | 'staging' | 'development';
+  baselineDeploymentId: string;
+  targetVersion: string;
+  strategy: string;
+  status: DeploymentRequestStatus;
+  requestedBy: string;
+  approvedBy: string | null;
+  note: string;
+  resultDeploymentId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 // ─── Jobs ───
 export type JobRunStatus = 'draft' | 'dry_run_ready' | 'approved' | 'running' | 'done' | 'failed' | 'aborted';
 

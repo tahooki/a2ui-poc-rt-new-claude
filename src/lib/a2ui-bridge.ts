@@ -120,6 +120,460 @@ function mkTabs(id: string, tabs: Array<{ title: string; childId: string }>): A2
   };
 }
 
+function mkInfoRow(
+  prefix: string,
+  iconName: string,
+  label: string,
+  value:
+    | { kind: 'text'; text: string; usageHint?: string }
+    | { kind: 'data'; path: string; usageHint?: string },
+): { components: A2UIComponent[]; rowId: string } {
+  const iconId = `${prefix}_icon`;
+  const labelId = `${prefix}_label`;
+  const leftId = `${prefix}_left`;
+  const valueId = `${prefix}_value`;
+  const rowId = `${prefix}_row`;
+
+  const valueComponent =
+    value.kind === 'data'
+      ? mkDataText(valueId, value.path, value.usageHint)
+      : mkText(valueId, value.text, value.usageHint);
+
+  return {
+    rowId,
+    components: [
+      mkIcon(iconId, iconName),
+      mkText(labelId, label, 'caption'),
+      mkRow(leftId, [iconId, labelId], 'start'),
+      valueComponent,
+      mkRow(rowId, [leftId, valueId], 'spaceBetween'),
+    ],
+  };
+}
+
+function rollbackVerdictSummary(input: { failCount: number; warnCount: number }) {
+  if (input.failCount > 0) {
+    return {
+      title: '즉시 롤백 검토',
+      detail: `실패 체크 ${input.failCount}개가 감지되어 현재 배포 상태를 유지하기 어렵습니다.`,
+    };
+  }
+
+  if (input.warnCount > 0) {
+    return {
+      title: '주의 후 진행',
+      detail: `경고 ${input.warnCount}개가 남아 있어 Dry-Run과 승인 상태를 함께 확인하는 편이 안전합니다.`,
+    };
+  }
+
+  return {
+    title: '진행 가능',
+    detail: '현재 수집된 위험 체크 기준으로는 치명적인 차단 신호가 없습니다.',
+  };
+}
+
+function asText(value: unknown, fallback = 'N/A'): string {
+  if (value === null || value === undefined) return fallback;
+  const text = String(value).trim();
+  return text.length > 0 ? text : fallback;
+}
+
+function pickText(
+  source: Record<string, unknown>,
+  keys: string[],
+  fallback = 'N/A',
+): string {
+  for (const key of keys) {
+    const value = source[key];
+    if (value !== null && value !== undefined) {
+      const text = String(value).trim();
+      if (text.length > 0) return text;
+    }
+  }
+  return fallback;
+}
+
+function normalizeSignalList(source: Record<string, unknown>): string[] {
+  const rawSignals =
+    source['recentSignals'] ??
+    source['signals'] ??
+    source['riskSignals'] ??
+    source['recent_risk_signals'] ??
+    source['signalSummary'] ??
+    source['risk_signal_summary'] ??
+    source['recent_signal_summary'];
+
+  if (Array.isArray(rawSignals)) {
+    return rawSignals
+      .map((item) => String(item).trim())
+      .filter(Boolean)
+      .slice(0, 4);
+  }
+
+  if (typeof rawSignals === 'string') {
+    return rawSignals
+      .split(/[|,·/]/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .slice(0, 4);
+  }
+
+  const fallback = pickText(source, ['signal_summary', 'risk_signal_summary'], '');
+  return fallback ? [fallback] : [];
+}
+
+function normalizeRollbackCandidates(
+  cardData: Record<string, unknown>,
+): Array<Record<string, unknown>> {
+  const candidates =
+    cardData['rollbackCandidates'] ??
+    cardData['candidates'] ??
+    cardData['deployments'] ??
+    cardData['items'];
+
+  if (Array.isArray(candidates)) {
+    return candidates.filter((candidate): candidate is Record<string, unknown> => {
+      return Boolean(candidate) && typeof candidate === 'object' && !Array.isArray(candidate);
+    });
+  }
+
+  const deployment = cardData['deployment'];
+  if (deployment && typeof deployment === 'object' && !Array.isArray(deployment)) {
+    return [deployment as Record<string, unknown>];
+  }
+
+  return [];
+}
+
+function candidateStatusLabel(candidate: Record<string, unknown>): string {
+  const status = pickText(candidate, ['state', 'candidate_state', 'rollback_state', 'status'], '');
+  if (status === 'candidate') return '후보';
+  if (status === 'rollback_requested') return '롤백 요청됨';
+  if (status === 'rollbacked') return '롤백됨';
+  if (status === 'rolled_back') return '롤백됨';
+  if (!status) return '후보';
+  return statusLabel(status);
+}
+
+function candidateActionable(candidate: Record<string, unknown>): boolean {
+  const status = pickText(candidate, ['state', 'candidate_state', 'rollback_state', 'status'], '');
+  const previousVersion = pickText(candidate, ['previous_version', 'previousVersion', 'target_version'], '');
+  const availability = candidate['available'];
+
+  if (availability === false) return false;
+  if (!previousVersion || previousVersion === 'N/A') return false;
+  if (status === 'rolled_back') return false;
+  if (String(candidate['rollbackable'] ?? '').toLowerCase() === 'false') return false;
+  return true;
+}
+
+function buildCandidateLabel(candidate: Record<string, unknown>): string {
+  const service = pickText(candidate, ['service_name', 'service', 'service_id'], '서비스');
+  const environment = pickText(candidate, ['environment', 'env'], '환경');
+  const currentVersion = pickText(candidate, ['version', 'current_version', 'currentVersion'], 'N/A');
+  return `${service} · ${environment} · 현재 ${currentVersion}`;
+}
+
+function rollbackCandidateRoleLabel(role: string): string {
+  switch (role) {
+    case 'current_target':
+      return '지금 롤백할 대상';
+    case 'recovery_target':
+      return '복구될 버전';
+    default:
+      return '이전 배포 이력';
+  }
+}
+
+function buildStepStatusNote(status: string, isCurrentStep: boolean) {
+  if (isCurrentStep) {
+    return '현재 대기 중인 단계입니다. 실행 전에 대상 배포와 리스크 신호를 다시 확인하세요.';
+  }
+
+  switch (status) {
+    case 'completed':
+    case 'done':
+      return '검증이 끝난 단계입니다.';
+    case 'running':
+    case 'in_progress':
+      return '실행 중인 단계입니다.';
+    case 'failed':
+    case 'fail':
+      return '실패한 단계입니다. 원인을 확인한 뒤 다음 액션을 결정해야 합니다.';
+    default:
+      return '아직 시작하지 않은 단계입니다.';
+  }
+}
+
+// ─── Rollback Action Card ───────────────────────────────────────────────────
+
+export function buildRollbackActionCard(cardData: Record<string, unknown>): A2UICardDef {
+  const candidates = normalizeRollbackCandidates(cardData).slice(0, 5);
+  const serviceName = pickText(
+    cardData,
+    ['service_name', 'service', 'service_id', 'serviceId'],
+    candidates[0] ? pickText(candidates[0], ['service_name', 'service', 'service_id'], '대상 서비스') : '대상 서비스',
+  );
+  const envScope = pickText(
+    cardData,
+    ['environment', 'env'],
+    candidates[0] ? pickText(candidates[0], ['environment', 'env'], '전체 환경') : '전체 환경',
+  );
+  const scopeCount = candidates.length;
+  const availabilityCount = candidates.filter((candidate) => candidateActionable(candidate)).length;
+  const primaryCandidate =
+    candidates.find((candidate) => candidate['primary_candidate'] === true) ?? candidates[0] ?? null;
+  const summaryText =
+    scopeCount > 0
+      ? `${serviceName} · ${envScope} · 지금 롤백 대상 ${availabilityCount} / 전체 이력 ${scopeCount}`
+      : '롤백 가능한 배포 후보가 없습니다.';
+
+  const headerComponents: A2UIComponent[] = [
+    mkText('rollback_title', '롤백 실행', 'h2'),
+    mkText('rollback_eyebrow', 'A2UI · 롤백 액션 카드', 'caption'),
+    mkText('rollback_headline', '현재 문제 배포와 직전 안정 버전을 함께 보여줍니다.', 'h4'),
+    mkText('rollback_summary', summaryText, 'caption'),
+    ...(primaryCandidate
+      ? [
+          mkText(
+            'rollback_primary_hint',
+            `${pickText(primaryCandidate, ['version', 'current_version'], '현재 배포')} 항목이 기본 롤백 대상입니다.`,
+            'caption',
+          ),
+        ]
+      : []),
+    mkDivider('rollback_div_top'),
+  ];
+
+  const candidateComponents: A2UIComponent[] = [];
+  const primaryCandidateIds: string[] = [];
+  const secondaryCandidateIds: string[] = [];
+
+  if (candidates.length === 0) {
+    candidateComponents.push(
+      mkIcon('rollback_empty_icon', 'info'),
+      mkText('rollback_empty_title', '롤백 가능한 배포 후보가 없습니다.', 'h4'),
+      mkText(
+        'rollback_empty_detail',
+        '이 서비스에서 되돌릴 수 있는 최근 배포가 아직 없습니다. 배포 페이지에서 더 많은 문맥을 확인하세요.',
+        'caption',
+      ),
+      mkCol('rollback_empty_col', [
+        'rollback_empty_icon',
+        'rollback_empty_title',
+        'rollback_empty_detail',
+      ]),
+    );
+    primaryCandidateIds.push('rollback_empty_col');
+  } else {
+    candidates.forEach((candidate, index) => {
+      const candidateId = String(candidate['id'] ?? candidate['deployment_id'] ?? `candidate-${index}`);
+      const currentVersion = pickText(candidate, ['version', 'current_version', 'currentVersion']);
+      const previousVersion = pickText(candidate, ['previous_version', 'previousVersion', 'target_version']);
+      const environment = pickText(candidate, ['environment', 'env'], envScope);
+      const status = pickText(candidate, ['state', 'candidate_state', 'rollback_state', 'status'], 'candidate');
+      const deployedAt = pickText(candidate, ['deployed_at', 'created_at', 'updated_at', 'started_at'], '');
+      const signals = normalizeSignalList(candidate);
+      const actionable = candidateActionable(candidate);
+      const statusIconName = statusIcon(status);
+      const candidateRole = pickText(candidate, ['candidate_role'], 'history');
+      const roleLabel = rollbackCandidateRoleLabel(candidateRole);
+
+      const signalText =
+        signals.length > 0
+          ? `최근 신호: ${signals.join(' · ')}`
+          : '최근 신호: -';
+      const timeText = deployedAt ? `배포 시각: ${deployedAt}` : '배포 시각: -';
+      const versionText = `현재 ${currentVersion} → 이전 ${previousVersion || 'N/A'}`;
+      const stateNote =
+        candidateRole === 'current_target'
+          ? '현재 실패한 배포입니다. 이 행의 롤백 버튼을 누르면 지금 이 배포를 되돌립니다.'
+          : candidateRole === 'recovery_target'
+            ? '현재 배포가 롤백되면 이 버전으로 복구됩니다.'
+            : previousVersion
+              ? '참고용 이전 배포 이력입니다.'
+              : '이전 버전이 없어 롤백 불가';
+
+      const rowChildren: string[] = [];
+      const rowComponents: A2UIComponent[] = [
+        mkText(`rollback_${index}_service`, buildCandidateLabel(candidate), 'h4'),
+        mkIcon(`rollback_${index}_status_icon`, statusIconName),
+        mkText(`rollback_${index}_status`, candidateStatusLabel(candidate), 'caption'),
+        mkRow(`rollback_${index}_header`, [
+          `rollback_${index}_service`,
+          `rollback_${index}_status_icon`,
+          `rollback_${index}_status`,
+        ], 'spaceBetween'),
+        mkText(`rollback_${index}_role`, roleLabel, 'caption'),
+        mkText(`rollback_${index}_version`, versionText, 'body'),
+        mkText(`rollback_${index}_env`, `환경: ${environment}`, 'caption'),
+        mkText(`rollback_${index}_time`, timeText, 'caption'),
+        mkText(`rollback_${index}_signals`, signalText, 'caption'),
+        mkText(`rollback_${index}_note`, stateNote, 'caption'),
+      ];
+
+      rowChildren.push(
+        `rollback_${index}_header`,
+        `rollback_${index}_role`,
+        `rollback_${index}_version`,
+        `rollback_${index}_env`,
+        `rollback_${index}_time`,
+        `rollback_${index}_signals`,
+        `rollback_${index}_note`,
+        `rollback_${index}_actions_div`,
+        `rollback_${index}_actions`,
+      );
+
+      rowComponents.push(
+        mkDivider(`rollback_${index}_actions_div`),
+        mkText(`rollback_${index}_detail_text`, '상세 보기'),
+        mkButton(
+          `rollback_${index}_detail_btn`,
+          `rollback_${index}_detail_text`,
+          'view_rollback_candidate',
+          {
+            candidateId,
+            deploymentId: candidateId,
+            serviceId: pickText(candidate, ['service_id', 'service', 'service_name'], serviceName),
+            environment,
+          },
+        ),
+      );
+      if (actionable) {
+        rowComponents.push(
+          mkText(`rollback_${index}_rollback_text`, '이 배포 롤백'),
+          mkButton(
+            `rollback_${index}_rollback_btn`,
+            `rollback_${index}_rollback_text`,
+            'execute_rollback',
+            {
+              candidateId,
+              deploymentId: candidateId,
+              planId: asText(candidate['plan_id'] ?? candidate['rollback_plan_id'] ?? ''),
+              serviceId: pickText(candidate, ['service_id', 'service', 'service_name'], serviceName),
+              environment,
+            },
+            true,
+          ),
+        );
+      } else {
+        rowComponents.push(mkText(`rollback_${index}_info_text`, roleLabel, 'caption'));
+      }
+
+      rowComponents.push(
+        mkRow(`rollback_${index}_actions`, actionable
+          ? [`rollback_${index}_detail_btn`, `rollback_${index}_rollback_btn`]
+          : [`rollback_${index}_detail_btn`, `rollback_${index}_info_text`],
+        'end'),
+        mkDivider(`rollback_${index}_divider`),
+        mkCol(`rollback_${index}_col`, rowChildren),
+        mkCard(`rollback_${index}_card`, `rollback_${index}_col`),
+      );
+
+      candidateComponents.push(...rowComponents);
+      if (candidateRole === 'current_target') {
+        primaryCandidateIds.push(`rollback_${index}_card`);
+      } else {
+        secondaryCandidateIds.push(`rollback_${index}_card`);
+      }
+    });
+  }
+
+  const listComponents: A2UIComponent[] = [];
+  if (primaryCandidateIds.length > 0) {
+    listComponents.push(mkList('rollback_primary_list', primaryCandidateIds, 'vertical'));
+  }
+  if (secondaryCandidateIds.length > 0) {
+    listComponents.push(
+      mkDivider('rollback_related_div'),
+      mkText('rollback_related_title', '복구될 버전 및 이전 이력', 'h3'),
+      mkText('rollback_related_detail', '아래 항목은 롤백되었을 때 돌아가거나 참고할 버전입니다.', 'caption'),
+      mkList('rollback_related_list', secondaryCandidateIds, 'vertical'),
+    );
+  }
+
+  const components: A2UIComponent[] = [
+    ...headerComponents,
+    ...candidateComponents,
+    ...listComponents,
+    mkCol('rollback_main_col', [
+      'rollback_title',
+      'rollback_eyebrow',
+      'rollback_headline',
+      'rollback_summary',
+      ...(primaryCandidate ? ['rollback_primary_hint'] : []),
+      'rollback_div_top',
+      ...(primaryCandidateIds.length > 0 ? ['rollback_primary_list'] : ['rollback_empty_col']),
+      ...(secondaryCandidateIds.length > 0
+        ? ['rollback_related_div', 'rollback_related_title', 'rollback_related_detail', 'rollback_related_list']
+        : []),
+    ]),
+    mkCard('root_card', 'rollback_main_col'),
+  ];
+
+  return {
+    root: 'root_card',
+    components,
+    data: {
+      service: serviceName,
+      environment: envScope,
+      candidates: candidates.map((candidate) => ({
+        id: candidate['id'] ?? candidate['deployment_id'] ?? '',
+        service_id: pickText(candidate, ['service_id', 'service', 'service_name'], serviceName),
+        version: pickText(candidate, ['version', 'current_version', 'currentVersion']),
+        previous_version: pickText(candidate, ['previous_version', 'previousVersion', 'target_version']),
+        environment: pickText(candidate, ['environment', 'env'], envScope),
+        status: candidateStatusLabel(candidate),
+      })),
+    },
+  };
+}
+
+function evidenceVerdictSummary(input: {
+  severity: string;
+  evidenceCount: number;
+  criticalSignalCount: number;
+}) {
+  if (input.severity === 'critical' || input.criticalSignalCount >= 2) {
+    return {
+      title: '즉시 원인 확인 필요',
+      detail: `중요 신호 ${input.criticalSignalCount}개가 감지되었습니다. 로그와 설정 변경을 먼저 교차 검토하세요.`,
+    };
+  }
+
+  if (input.evidenceCount > 0) {
+    return {
+      title: '추가 비교 권장',
+      detail: `수집된 증거 ${input.evidenceCount}건을 기반으로 원인 후보를 좁힐 수 있습니다.`,
+    };
+  }
+
+  return {
+    title: '증거 부족',
+    detail: '아직 비교할 만한 증거가 충분하지 않습니다.',
+  };
+}
+
+function actionRiskSummary(actionType: 'rollback' | 'job_execute' | 'incident_close') {
+  switch (actionType) {
+    case 'rollback':
+      return {
+        title: '고위험 변경',
+        detail: '서비스 상태와 승인 여부를 다시 확인한 뒤 실행하는 편이 안전합니다.',
+      };
+    case 'job_execute':
+      return {
+        title: '실행 전 검토 필요',
+        detail: '입력 파라미터와 dry-run 결과를 마지막으로 점검해야 합니다.',
+      };
+    default:
+      return {
+        title: '종결 전 확인',
+        detail: '후속 조치와 커뮤니케이션이 모두 완료되었는지 확인해야 합니다.',
+      };
+  }
+}
+
 // ─── Status helpers ─────────────────────────────────────────────────────────
 
 function statusIcon(status: string): string {
@@ -134,6 +588,17 @@ function statusIcon(status: string): string {
       return 'hourglass_top';
     case 'pending': case 'draft': case 'open':
       return 'radio_button_unchecked';
+    case 'suggested':
+      return 'auto_awesome';
+    case 'draft_created':
+    case 'approval_requested':
+      return 'edit_note';
+    case 'approval_pending':
+      return 'hourglass_top';
+    case 'held':
+      return 'pause_circle';
+    case 'expired':
+      return 'schedule';
     case 'investigating': case 'dry_run_ready': case 'dry_run_passed':
       return 'search';
     case 'mitigated': case 'resolved':
@@ -149,6 +614,12 @@ function statusLabel(status: string): string {
     completed: '완료', running: '진행중', pending: '대기',
     failed: '실패', succeeded: '성공', done: '완료',
     approved: '승인됨', denied: '거부됨',
+    suggested: '제안됨',
+    draft_created: '초안 생성됨',
+    approval_requested: '승인 요청됨',
+    approval_pending: '승인 대기',
+    held: '보류',
+    expired: '만료됨',
     draft: '초안', dry_run_ready: 'Dry-Run 준비', dry_run_passed: 'Dry-Run 통과',
     open: '열림', investigating: '조사중', mitigated: '완화됨', resolved: '해결됨', closed: '종료',
     rolled_back: '롤백됨',
@@ -177,44 +648,46 @@ export function buildRollbackSummaryCard(
   const deploymentDiffs = context?.deploymentDiffs ?? [];
   const recentAuditLogs = context?.recentAuditLogs ?? [];
   const approvalStatus = context?.approvalStatus ?? null;
+  const passCount = riskChecks.filter((check) => check['status'] === 'pass').length;
+  const warnCount = riskChecks.filter((check) => check['status'] === 'warn').length;
+  const failCount = riskChecks.filter((check) => check['status'] === 'fail').length;
+  const riskSummaryText = `통과 ${passCount} / 경고 ${warnCount} / 실패 ${failCount}`;
+  const verdict = rollbackVerdictSummary({ failCount, warnCount });
+  const approvalStatusText = statusLabel(String(approvalStatus?.['status'] ?? 'draft'));
+  const approvalMessage = String(approvalStatus?.['message'] ?? '승인 상태 정보 없음');
 
-  // ── Tab 1: 배포 정보 ──
+  const deploymentRows = [
+    mkInfoRow('dep_ver', 'tag', '버전', { kind: 'data', path: '/deployment/version' }),
+    mkInfoRow('dep_svc', 'dns', '서비스', { kind: 'data', path: '/deployment/service_id' }),
+    mkInfoRow('dep_st', statusIcon(String(deployment['status'] ?? '')), '상태', {
+      kind: 'data',
+      path: '/deployment/status',
+    }),
+    mkInfoRow('dep_env', 'cloud', '환경', { kind: 'data', path: '/deployment/environment' }),
+    mkInfoRow('dep_ro', 'speed', '롤아웃', { kind: 'data', path: '/deployment/rollout_percent' }),
+  ];
+
   const deployInfoComponents: A2UIComponent[] = [
     mkText('dep_title', '배포 정보', 'h3'),
     mkDivider('dep_div_1'),
-    // Version row
-    mkIcon('dep_ver_icon', 'tag'),
-    mkText('dep_ver_label', '버전'),
-    mkDataText('dep_ver_val', '/deployment/version'),
-    mkRow('dep_ver_row', ['dep_ver_icon', 'dep_ver_label', 'dep_ver_val'], 'spaceBetween'),
-    // Service row
-    mkIcon('dep_svc_icon', 'dns'),
-    mkText('dep_svc_label', '서비스'),
-    mkDataText('dep_svc_val', '/deployment/service_id'),
-    mkRow('dep_svc_row', ['dep_svc_icon', 'dep_svc_label', 'dep_svc_val'], 'spaceBetween'),
-    // Status row
-    mkIcon('dep_st_icon', statusIcon(String(deployment['status'] ?? ''))),
-    mkText('dep_st_label', '상태'),
-    mkDataText('dep_st_val', '/deployment/status'),
-    mkRow('dep_st_row', ['dep_st_icon', 'dep_st_label', 'dep_st_val'], 'spaceBetween'),
-    // Environment row
-    mkIcon('dep_env_icon', 'cloud'),
-    mkText('dep_env_label', '환경'),
-    mkDataText('dep_env_val', '/deployment/environment'),
-    mkRow('dep_env_row', ['dep_env_icon', 'dep_env_label', 'dep_env_val'], 'spaceBetween'),
-    // Rollout row
-    mkIcon('dep_ro_icon', 'speed'),
-    mkText('dep_ro_label', '롤아웃'),
-    mkDataText('dep_ro_val', '/deployment/rollout_percent'),
-    mkRow('dep_ro_row', ['dep_ro_icon', 'dep_ro_label', 'dep_ro_val'], 'spaceBetween'),
-    // Column
+    mkText('dep_overview_label', '현재 권고', 'caption'),
+    mkText('dep_overview_title', verdict.title, 'h4'),
+    mkText(
+      'dep_overview_detail',
+      `${verdict.detail} 승인 상태는 ${approvalStatusText}입니다.`,
+      'caption',
+    ),
+    ...deploymentRows.flatMap((row) => row.components),
     mkCol('dep_info_col', [
-      'dep_title', 'dep_div_1',
-      'dep_ver_row', 'dep_svc_row', 'dep_st_row', 'dep_env_row', 'dep_ro_row',
+      'dep_title',
+      'dep_div_1',
+      'dep_overview_label',
+      'dep_overview_title',
+      'dep_overview_detail',
+      ...deploymentRows.map((row) => row.rowId),
     ]),
   ];
 
-  // ── Tab 2: 리스크 체크 ──
   const riskComponents: A2UIComponent[] = [
     mkText('risk_title', `위험 체크 결과 (${riskChecks.length}개)`, 'h3'),
     mkDivider('risk_div_1'),
@@ -222,60 +695,53 @@ export function buildRollbackSummaryCard(
   const riskRowIds: string[] = [];
   const riskCheckData: Record<string, boolean> = {};
 
-  riskChecks.forEach((check, i) => {
-    const status = check['status'] as string;
-    const checkName = String(check['check_name'] ?? `체크 ${i + 1}`);
+  riskChecks.forEach((check, index) => {
+    const status = String(check['status'] ?? 'pending');
+    const checkName = String(check['check_name'] ?? `체크 ${index + 1}`);
     const detail = String(check['detail'] ?? '');
-    const iconId = `risk_icon_${i}`;
-    const nameId = `risk_name_${i}`;
-    const detailId = `risk_detail_${i}`;
-    const statusId = `risk_status_${i}`;
-    const infoColId = `risk_info_${i}`;
-    const rowId = `risk_row_${i}`;
+    const iconId = `risk_icon_${index}`;
+    const nameId = `risk_name_${index}`;
+    const detailId = `risk_detail_${index}`;
+    const statusId = `risk_status_${index}`;
+    const infoColId = `risk_info_${index}`;
+    const rowId = `risk_row_${index}`;
 
     riskComponents.push(
       mkIcon(iconId, statusIcon(status)),
       mkText(nameId, checkName, 'h4'),
       mkText(detailId, detail || '-', 'caption'),
       mkCol(infoColId, [nameId, detailId]),
-      mkText(statusId, `[${statusLabel(status).toUpperCase()}]`),
+      mkText(statusId, statusLabel(status), 'caption'),
       mkRow(rowId, [iconId, infoColId, statusId], 'spaceBetween'),
     );
     riskRowIds.push(rowId);
-    riskCheckData[`/riskChecks/${i}/passed`] = status === 'pass';
+    riskCheckData[`/riskChecks/${index}/passed`] = status === 'pass';
   });
 
-  // Summary line
-  const passCount = riskChecks.filter((c) => c['status'] === 'pass').length;
-  const warnCount = riskChecks.filter((c) => c['status'] === 'warn').length;
-  const failCount = riskChecks.filter((c) => c['status'] === 'fail').length;
-  const summaryText = `통과 ${passCount} / 경고 ${warnCount} / 실패 ${failCount}`;
   riskComponents.push(
     mkDivider('risk_div_2'),
-    mkText('risk_summary', summaryText, 'caption'),
-  );
-
-  riskComponents.push(
+    mkText('risk_summary', riskSummaryText, 'caption'),
     mkCol('risk_col', ['risk_title', 'risk_div_1', ...riskRowIds, 'risk_div_2', 'risk_summary']),
   );
 
-  // ── Tab 3: 롤백 계획 ──
+  const planRows = [
+    mkInfoRow('plan_st', statusIcon(planStatus ?? 'draft'), '계획 상태', {
+      kind: 'text',
+      text: statusLabel(planStatus ?? '없음'),
+    }),
+    mkInfoRow('plan_tv', 'history', '복구 대상 버전', {
+      kind: 'data',
+      path: '/plan/target_version',
+    }),
+  ];
+
   const planComponents: A2UIComponent[] = [
     mkText('plan_title', '롤백 계획', 'h3'),
     mkDivider('plan_div_1'),
-    // Plan status
-    mkIcon('plan_st_icon', statusIcon(planStatus ?? 'draft')),
-    mkText('plan_st_label', '계획 상태'),
-    mkText('plan_st_val', statusLabel(planStatus ?? '없음')),
-    mkRow('plan_st_row', ['plan_st_icon', 'plan_st_label', 'plan_st_val'], 'spaceBetween'),
-    // Target version
-    mkIcon('plan_tv_icon', 'history'),
-    mkText('plan_tv_label', '복구 대상 버전'),
-    mkDataText('plan_tv_val', '/plan/target_version'),
-    mkRow('plan_tv_row', ['plan_tv_icon', 'plan_tv_label', 'plan_tv_val'], 'spaceBetween'),
+    mkText('plan_summary', `리스크 요약: ${riskSummaryText}`, 'caption'),
+    ...planRows.flatMap((row) => row.components),
   ];
 
-  // Action buttons
   const actionChildIds: string[] = [];
 
   if (!planStatus || planStatus === 'draft') {
@@ -313,26 +779,26 @@ export function buildRollbackSummaryCard(
   planComponents.push(
     mkDivider('plan_div_2'),
     mkRow('plan_btn_row', actionChildIds, 'end'),
-    mkCol('plan_col', ['plan_title', 'plan_div_1', 'plan_st_row', 'plan_tv_row', 'plan_div_2', 'plan_btn_row']),
+    mkCol('plan_col', [
+      'plan_title',
+      'plan_div_1',
+      'plan_summary',
+      ...planRows.map((row) => row.rowId),
+      'plan_div_2',
+      'plan_btn_row',
+    ]),
   );
 
-  // ── Tab 4: 운영 문맥 ──
   const contextComponents: A2UIComponent[] = [
     mkText('ctx_title', '운영 문맥', 'h3'),
     mkDivider('ctx_div_1'),
-  ];
-  const contextRowIds: string[] = ['ctx_title', 'ctx_div_1'];
-
-  const approvalStatusText = statusLabel(String(approvalStatus?.['status'] ?? 'draft'));
-  const approvalMessage = String(approvalStatus?.['message'] ?? '승인 상태 정보 없음');
-  contextComponents.push(
-    mkIcon('ctx_appr_icon', statusIcon(String(approvalStatus?.['status'] ?? 'draft'))),
-    mkText('ctx_appr_label', '승인 상태'),
-    mkText('ctx_appr_val', approvalStatusText),
-    mkRow('ctx_appr_row', ['ctx_appr_icon', 'ctx_appr_label', 'ctx_appr_val'], 'spaceBetween'),
+    ...mkInfoRow('ctx_appr', statusIcon(String(approvalStatus?.['status'] ?? 'draft')), '승인 상태', {
+      kind: 'text',
+      text: approvalStatusText,
+    }).components,
     mkText('ctx_appr_msg', approvalMessage, 'caption'),
-  );
-  contextRowIds.push('ctx_appr_row', 'ctx_appr_msg');
+  ];
+  const contextRowIds: string[] = ['ctx_title', 'ctx_div_1', 'ctx_appr_row', 'ctx_appr_msg'];
 
   const diffSummary = {
     added: deploymentDiffs.filter((diff) => String(diff['change_type'] ?? '') === 'added').length,
@@ -392,13 +858,17 @@ export function buildRollbackSummaryCard(
     });
   }
 
-  contextComponents.push(
-    mkCol('ctx_col', contextRowIds),
-  );
+  contextComponents.push(mkCol('ctx_col', contextRowIds));
 
-  // ── Root with Tabs ──
   const components: A2UIComponent[] = [
     mkText('card_title', '롤백 판단 요약', 'h2'),
+    mkText('card_verdict_label', '배포 판단', 'caption'),
+    mkText('card_verdict_title', verdict.title, 'h4'),
+    mkText(
+      'card_verdict_detail',
+      `${riskSummaryText} · 승인 ${approvalStatusText} · 관련 인시던트 ${relatedIncidents.length}건`,
+      'caption',
+    ),
     mkDivider('card_div_top'),
     ...deployInfoComponents,
     ...riskComponents,
@@ -410,7 +880,14 @@ export function buildRollbackSummaryCard(
       { title: '롤백 계획', childId: 'plan_col' },
       { title: '운영 문맥', childId: 'ctx_col' },
     ]),
-    mkCol('main_col', ['card_title', 'card_div_top', 'main_tabs']),
+    mkCol('main_col', [
+      'card_title',
+      'card_verdict_label',
+      'card_verdict_title',
+      'card_verdict_detail',
+      'card_div_top',
+      'main_tabs',
+    ]),
     mkCard('root_card', 'main_col'),
   ];
 
@@ -422,7 +899,7 @@ export function buildRollbackSummaryCard(
         id: deployment['id'],
         version: String(deployment['version'] ?? 'N/A'),
         service_id: String(deployment['service_id'] ?? 'N/A'),
-        status: String(deployment['status'] ?? 'N/A'),
+        status: statusLabel(String(deployment['status'] ?? 'N/A')),
         environment: String(deployment['environment'] ?? 'N/A'),
         rollout_percent: `${deployment['rollout_percent'] ?? 0}%`,
       },
@@ -458,7 +935,6 @@ export function buildEvidenceComparisonCard(
   const recentAuditLogs = context?.recentAuditLogs ?? [];
   const rootCauseHints = context?.rootCauseHints ?? [];
   const nextActions = context?.nextActions ?? [];
-  // Group evidence by type
   const byType: Record<string, Array<Record<string, unknown>>> = {};
   for (const ev of evidence) {
     const type = String(ev['type'] ?? 'other');
@@ -474,39 +950,57 @@ export function buildEvidenceComparisonCard(
     config_diff: '설정 변경',
     other: '기타',
   };
+  const severity = String(incident['severity'] ?? 'medium');
+  const status = String(incident['status'] ?? 'open');
+  const criticalSignalCount = evidence.filter((item) =>
+    ['error_rate', 'config_diff', 'trace'].includes(String(item['type'] ?? 'other')),
+  ).length;
+  const verdict = evidenceVerdictSummary({
+    severity,
+    evidenceCount: evidence.length,
+    criticalSignalCount,
+  });
+  const incidentRows = [
+    mkInfoRow('inc_sev', statusIcon(severity === 'critical' ? 'failed' : severity === 'high' ? 'warn' : 'open'), '심각도', {
+      kind: 'data',
+      path: '/incident/severity',
+    }),
+    mkInfoRow('inc_st', statusIcon(status), '상태', {
+      kind: 'data',
+      path: '/incident/status',
+    }),
+    mkInfoRow('inc_svc', 'dns', '서비스', {
+      kind: 'data',
+      path: '/incident/service_id',
+    }),
+  ];
 
-  // ── Incident summary (always visible) ──
   const incidentComponents: A2UIComponent[] = [
     mkText('inc_title', '증거 비교 분석', 'h2'),
+    mkText('inc_verdict_label', '분석 요약', 'caption'),
+    mkText('inc_verdict_title', verdict.title, 'h4'),
+    mkText(
+      'inc_verdict_detail',
+      `${verdict.detail} 현재 상태는 ${statusLabel(status)}입니다.`,
+      'caption',
+    ),
     mkDivider('inc_div_top'),
-    // Severity
-    mkIcon('inc_sev_icon', statusIcon(String(incident['severity'] ?? ''))),
-    mkText('inc_sev_label', '심각도'),
-    mkDataText('inc_sev_val', '/incident/severity'),
-    mkRow('inc_sev_row', ['inc_sev_icon', 'inc_sev_label', 'inc_sev_val'], 'spaceBetween'),
-    // Status
-    mkIcon('inc_st_icon', statusIcon(String(incident['status'] ?? ''))),
-    mkText('inc_st_label', '상태'),
-    mkDataText('inc_st_val', '/incident/status'),
-    mkRow('inc_st_row', ['inc_st_icon', 'inc_st_label', 'inc_st_val'], 'spaceBetween'),
-    // Service
-    mkIcon('inc_svc_icon', 'dns'),
-    mkText('inc_svc_label', '서비스'),
-    mkDataText('inc_svc_val', '/incident/service_id'),
-    mkRow('inc_svc_row', ['inc_svc_icon', 'inc_svc_label', 'inc_svc_val'], 'spaceBetween'),
-    // Summary count
-    mkText('inc_ev_count', `총 ${evidence.length}개 증거 수집됨`, 'caption'),
+    ...incidentRows.flatMap((row) => row.components),
+    mkText('inc_ev_count', `총 ${evidence.length}개 증거 수집됨 · 핵심 신호 ${criticalSignalCount}개`, 'caption'),
     mkDivider('inc_div_bottom'),
     mkCol('inc_summary_col', [
-      'inc_sev_row', 'inc_st_row', 'inc_svc_row', 'inc_ev_count',
+      'inc_title',
+      'inc_verdict_label',
+      'inc_verdict_title',
+      'inc_verdict_detail',
+      'inc_div_top',
+      ...incidentRows.map((row) => row.rowId),
+      'inc_ev_count',
     ]),
   ];
 
-  // ── Evidence tabs by type ──
   const tabDefs: Array<{ title: string; childId: string }> = [];
   const evidenceComponents: A2UIComponent[] = [];
-
-  // "전체" tab
   const allEvidenceRowIds: string[] = [];
   evidence.forEach((ev, i) => {
     const type = String(ev['type'] ?? 'other');
@@ -528,13 +1022,10 @@ export function buildEvidenceComparisonCard(
   });
 
   if (allEvidenceRowIds.length > 0) {
-    evidenceComponents.push(
-      mkList('ev_all_list', allEvidenceRowIds),
-    );
+    evidenceComponents.push(mkCol('ev_all_list', allEvidenceRowIds));
     tabDefs.push({ title: `전체 (${evidence.length})`, childId: 'ev_all_list' });
   }
 
-  // Per-type tabs
   Object.entries(byType).forEach(([type, items]) => {
     const typeKey = type.replace(/[^a-z0-9_]/g, '_');
     const itemRowIds: string[] = [];
@@ -572,19 +1063,15 @@ export function buildEvidenceComparisonCard(
     });
 
     const listId = `ev_${typeKey}_list`;
-    evidenceComponents.push(mkList(listId, itemRowIds));
+    evidenceComponents.push(mkCol(listId, itemRowIds));
     tabDefs.push({
       title: `${typeLabels[type] ?? type} (${items.length})`,
       childId: listId,
     });
   });
 
-  // Tabs
-  evidenceComponents.push(
-    mkTabs('ev_tabs', tabDefs),
-  );
+  evidenceComponents.push(mkTabs('ev_tabs', tabDefs));
 
-  // Key findings
   const keyFindings = evidence
     .filter((ev) => ev['type'] === 'error_rate' || ev['type'] === 'config_diff')
     .slice(0, 3)
@@ -704,7 +1191,7 @@ export function buildEvidenceComparisonCard(
   }
 
   const mainColChildren = [
-    'inc_title', 'inc_div_top', 'inc_summary_col', 'inc_div_bottom', 'ev_tabs',
+    'inc_summary_col', 'inc_div_bottom', 'ev_tabs',
     ...(keyFindings.length > 0 ? ['findings_div', 'findings_col'] : []),
     ...(triageChildren.length > 0 ? ['triage_col'] : []),
   ];
@@ -745,31 +1232,38 @@ export function buildDryRunStepperCard(
 ): A2UICardDef {
   const planId = String(rollbackPlan['id'] ?? '');
   const deploymentId = String(rollbackPlan['deployment_id'] ?? '');
-  const currentStepOrder = steps.find((s) => s['status'] === 'pending')?.['step_order'] as number | undefined;
+  const currentStepOrder = steps.find((step) => step['status'] === 'pending')?.['step_order'] as number | undefined;
   const deployment = context?.deployment ?? null;
   const riskChecks = context?.riskChecks ?? [];
   const dryRunSummary = context?.dryRunSummary ?? null;
-
-  // Completed count
-  const completedCount = steps.filter((s) => ['completed', 'done'].includes(String(s['status'] ?? ''))).length;
+  const passCount = riskChecks.filter((item) => String(item['status'] ?? '') === 'pass').length;
+  const warnCount = riskChecks.filter((item) => String(item['status'] ?? '') === 'warn').length;
+  const failCount = riskChecks.filter((item) => String(item['status'] ?? '') === 'fail').length;
+  const completedCount = steps.filter((step) => ['completed', 'done'].includes(String(step['status'] ?? ''))).length;
   const totalSteps = steps.length;
   const progressText = `${completedCount} / ${totalSteps} 단계 완료`;
+  const allCompleted = completedCount === totalSteps;
+  const hasPending = steps.some((step) => step['status'] === 'pending');
 
-  // Header
   const headerComponents: A2UIComponent[] = [
     mkText('stepper_title', 'Dry-Run 단계별 확인', 'h2'),
+    mkText('stepper_status_label', '진행 요약', 'caption'),
+    mkText(
+      'stepper_status_value',
+      allCompleted ? '모든 단계가 검증되었습니다.' : '다음 실행 단계를 확인하세요.',
+      'h4',
+    ),
     mkDivider('stepper_div_top'),
-    mkIcon('stepper_progress_icon', completedCount === totalSteps ? 'check_circle' : 'hourglass_top'),
-    mkText('stepper_progress_text', progressText),
-    mkRow('stepper_progress_row', ['stepper_progress_icon', 'stepper_progress_text'], 'start'),
+    ...mkInfoRow(
+      'stepper_progress',
+      allCompleted ? 'check_circle' : 'hourglass_top',
+      '진행 상태',
+      { kind: 'text', text: progressText },
+    ).components,
     mkText('stepper_plan_id', `계획: ${planId}`, 'caption'),
-    mkDivider('stepper_div_1'),
   ];
 
-  if (deployment || riskChecks.length > 0 || dryRunSummary) {
-    const passCount = riskChecks.filter((item) => String(item['status'] ?? '') === 'pass').length;
-    const warnCount = riskChecks.filter((item) => String(item['status'] ?? '') === 'warn').length;
-    const failCount = riskChecks.filter((item) => String(item['status'] ?? '') === 'fail').length;
+  if (deployment || riskChecks.length > 0) {
     headerComponents.push(
       mkText(
         'stepper_context',
@@ -777,53 +1271,58 @@ export function buildDryRunStepperCard(
         'caption',
       ),
     );
-    if (dryRunSummary) {
-      headerComponents.push(
-        mkText(
-          'stepper_dryrun_summary',
-          `Dry-run 요약: ${String(dryRunSummary['message'] ?? dryRunSummary['result'] ?? '확인 필요')}`,
-          'caption',
-        ),
-      );
-    }
   }
 
-  // Step rows
+  if (dryRunSummary) {
+    headerComponents.push(
+      mkText(
+        'stepper_dryrun_summary',
+        `Dry-run 요약: ${String(dryRunSummary['message'] ?? dryRunSummary['result'] ?? '확인 필요')}`,
+        'caption',
+      ),
+    );
+  }
+
+  headerComponents.push(mkDivider('stepper_div_1'));
+
   const stepComponents: A2UIComponent[] = [];
-  const stepRowIds: string[] = [];
+  const stepItemIds: string[] = [];
 
-  steps.forEach((step, i) => {
+  steps.forEach((step, index) => {
     const status = String(step['status'] ?? 'pending');
-    const action = String(step['action'] ?? step['description'] ?? `단계 ${i + 1}`);
+    const action = String(step['action'] ?? step['description'] ?? `단계 ${index + 1}`);
     const isCurrentStep = step['step_order'] === currentStepOrder;
-    const stepNum = String(step['step_order'] ?? i + 1);
-
-    const numId = `step_num_${i}`;
-    const iconId = `step_icon_${i}`;
-    const actionId = `step_action_${i}`;
-    const statusLabelId = `step_status_${i}`;
-    const infoId = `step_info_${i}`;
-    const rowId = `step_row_${i}`;
+    const stepNum = String(step['step_order'] ?? index + 1);
+    const markerId = `step_marker_${index}`;
+    const iconId = `step_icon_${index}`;
+    const titleId = `step_title_${index}`;
+    const titleRowId = `step_title_row_${index}`;
+    const statusId = `step_status_${index}`;
+    const noteId = `step_note_${index}`;
+    const cardId = `step_card_${index}`;
 
     stepComponents.push(
-      mkText(numId, isCurrentStep ? `▸ ${stepNum}` : stepNum, isCurrentStep ? 'h4' : 'body'),
+      mkText(markerId, isCurrentStep ? '현재 단계' : `단계 ${stepNum}`, 'caption'),
       mkIcon(iconId, statusIcon(status)),
-      mkText(actionId, action),
-      mkText(statusLabelId, statusLabel(status), 'caption'),
-      mkCol(infoId, [actionId, statusLabelId]),
-      mkRow(rowId, [numId, iconId, infoId], 'start'),
+      mkText(titleId, `${stepNum}. ${action}`, isCurrentStep ? 'h4' : 'body'),
+      mkRow(titleRowId, [iconId, titleId], 'start'),
+      mkText(statusId, `상태: ${statusLabel(status)}`, 'caption'),
+      mkText(noteId, buildStepStatusNote(status, isCurrentStep), 'caption'),
+      mkCol(cardId, [markerId, titleRowId, statusId, noteId]),
     );
-    stepRowIds.push(rowId);
+    stepItemIds.push(cardId);
+
+    if (index < steps.length - 1) {
+      const dividerId = `step_div_${index}`;
+      stepComponents.push(mkDivider(dividerId));
+      stepItemIds.push(dividerId);
+    }
   });
 
-  stepComponents.push(mkList('step_list', stepRowIds));
+  stepComponents.push(mkCol('step_list', stepItemIds));
 
-  // Action buttons
   const buttonComponents: A2UIComponent[] = [];
   const buttonIds: string[] = [];
-
-  const allCompleted = completedCount === totalSteps;
-  const hasPending = steps.some((s) => s['status'] === 'pending');
 
   if (hasPending) {
     buttonComponents.push(
@@ -847,10 +1346,18 @@ export function buildDryRunStepperCard(
   );
 
   const mainChildren = [
-    'stepper_title', 'stepper_div_top',
-    'stepper_progress_row', 'stepper_plan_id', 'stepper_div_1',
+    'stepper_title',
+    'stepper_status_label',
+    'stepper_status_value',
+    'stepper_div_top',
+    'stepper_progress_row',
+    'stepper_plan_id',
+    ...(deployment || riskChecks.length > 0 ? ['stepper_context'] : []),
+    ...(dryRunSummary ? ['stepper_dryrun_summary'] : []),
+    'stepper_div_1',
     'step_list',
-    'stepper_div_bottom', 'stepper_btn_row',
+    'stepper_div_bottom',
+    'stepper_btn_row',
   ];
 
   const components: A2UIComponent[] = [
@@ -892,6 +1399,7 @@ export function buildConfirmActionCard(
   const recentRelatedEvents = extra?.recentRelatedEvents ?? [];
   const approvalStatus = extra?.approvalStatus ?? null;
   const policyHints = extra?.policyHints ?? [];
+  const riskSummary = actionRiskSummary(actionType);
   const actionLabels: Record<string, string> = {
     rollback: '롤백 실행 확인',
     job_execute: 'Job 실행 확인',
@@ -910,46 +1418,56 @@ export function buildConfirmActionCard(
     incident_close: 'confirm_incident_close',
   };
 
-  // Header
   const headerComponents: A2UIComponent[] = [
-    mkIcon('confirm_warn_icon', 'warning'),
     mkText('confirm_title', actionLabels[actionType] ?? '실행 확인', 'h2'),
-    mkRow('confirm_header', ['confirm_warn_icon', 'confirm_title'], 'start'),
+    mkText('confirm_risk_label', '실행 전 리스크', 'caption'),
+    mkText('confirm_risk_title', riskSummary.title, 'h4'),
+    mkText('confirm_risk_detail', riskSummary.detail, 'caption'),
     mkDivider('confirm_div_top'),
     mkText('confirm_desc', actionDescriptions[actionType] ?? '', 'body'),
     mkDivider('confirm_div_1'),
   ];
 
-  // Entity info
   const entityComponents: A2UIComponent[] = [
     mkText('entity_title', '대상 정보', 'h3'),
   ];
   const entityRowIds: string[] = ['entity_title'];
   const entityData: Record<string, string> = {};
+  const entityIcons: Record<string, string> = {
+    id: 'badge',
+    service: 'dns',
+    service_id: 'dns',
+    version: 'tag',
+    environment: 'cloud',
+    status: 'info',
+    job: 'description',
+    job_id: 'description',
+    incident: 'error',
+    incident_id: 'error',
+  };
 
   Object.entries(entity).slice(0, 6).forEach(([key, val], i) => {
-    const labelId = `entity_label_${i}`;
-    const valId = `entity_val_${i}`;
-    const rowId = `entity_row_${i}`;
     const displayKey = key.replace(/_/g, ' ');
-    entityComponents.push(
-      mkText(labelId, displayKey),
-      mkDataText(valId, `/entity/${key}`),
-      mkRow(rowId, [labelId, valId], 'spaceBetween'),
+    const row = mkInfoRow(
+      `entity_${i}`,
+      entityIcons[key] ?? 'label',
+      displayKey,
+      { kind: 'data', path: `/entity/${key}` },
     );
-    entityRowIds.push(rowId);
+    entityComponents.push(...row.components);
+    entityRowIds.push(row.rowId);
     entityData[key] = String(val ?? '');
   });
 
   entityComponents.push(mkCol('entity_col', entityRowIds));
 
-  // Checklist with CheckBoxes
   const checklistComponents: A2UIComponent[] = [
     mkDivider('check_div'),
     mkText('check_title', '실행 전 확인 사항', 'h3'),
+    mkText('check_hint', '필수 항목을 먼저 확인한 뒤 실행 버튼을 누르세요.', 'caption'),
   ];
   const checklistData: Record<string, boolean> = {};
-  const checkIds: string[] = ['check_title'];
+  const checkIds: string[] = ['check_title', 'check_hint'];
 
   checks.forEach((check, i) => {
     const cbId = `check_cb_${i}`;
@@ -975,14 +1493,17 @@ export function buildConfirmActionCard(
   }
 
   if (approvalStatus) {
-    contextComponents.push(
-      mkText(
-        'confirm_ctx_approval',
-        `승인 상태: ${statusLabel(String(approvalStatus['status'] ?? 'draft'))}`,
-        'caption',
-      ),
+    const approvalRow = mkInfoRow(
+      'confirm_ctx_approval',
+      statusIcon(String(approvalStatus['status'] ?? 'draft')),
+      '승인 상태',
+      {
+        kind: 'text',
+        text: statusLabel(String(approvalStatus['status'] ?? 'draft')),
+      },
     );
-    contextIds.push('confirm_ctx_approval');
+    contextComponents.push(...approvalRow.components);
+    contextIds.push(approvalRow.rowId);
   }
 
   policyHints.slice(0, 3).forEach((hint, index) => {
@@ -1020,7 +1541,8 @@ export function buildConfirmActionCard(
   ];
 
   const mainChildren = [
-    'confirm_header', 'confirm_div_top', 'confirm_desc', 'confirm_div_1',
+    'confirm_title', 'confirm_risk_label', 'confirm_risk_title', 'confirm_risk_detail',
+    'confirm_div_top', 'confirm_desc', 'confirm_div_1',
     'entity_col', 'check_div', 'check_col',
     ...(contextIds.length > 0 ? ['confirm_ctx_col'] : []),
     'confirm_div_bottom', 'confirm_btn_row',
@@ -1479,6 +2001,712 @@ export function buildReportTemplateCard(
       },
       reportType,
       ...sectionData,
+    },
+  };
+}
+
+// ─── 7. Deployment Approval Inbox ─────────────────────────────────────────
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function asRecordList(value: unknown): Array<Record<string, unknown>> {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object' && !Array.isArray(item));
+}
+
+function pickBool(source: Record<string, unknown>, keys: string[], fallback = false): boolean {
+  for (const key of keys) {
+    const value = source[key];
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'string') {
+      const text = value.trim().toLowerCase();
+      if (['true', 'yes', '1', 'y'].includes(text)) return true;
+      if (['false', 'no', '0', 'n'].includes(text)) return false;
+    }
+  }
+  return fallback;
+}
+
+function normalizeRiskSummary(source: Record<string, unknown>): {
+  passCount: number;
+  warnCount: number;
+  failCount: number;
+  text: string;
+} {
+  const fromSummary = asRecord(
+    source['riskSummary'] ??
+      source['risk_summary'] ??
+      source['risk'] ??
+      source['summary'],
+  );
+  if (fromSummary) {
+    const passCount = Number(fromSummary['passCount'] ?? fromSummary['passed'] ?? fromSummary['pass'] ?? 0);
+    const warnCount = Number(fromSummary['warnCount'] ?? fromSummary['warnings'] ?? fromSummary['warn'] ?? 0);
+    const failCount = Number(fromSummary['failCount'] ?? fromSummary['failed'] ?? fromSummary['fail'] ?? 0);
+    return {
+      passCount,
+      warnCount,
+      failCount,
+      text: `통과 ${passCount} / 경고 ${warnCount} / 실패 ${failCount}`,
+    };
+  }
+
+  const checks = asRecordList(source['riskChecks'] ?? source['risk_checks'] ?? source['checks']);
+  if (checks.length > 0) {
+    const passCount = checks.filter((item) => String(item['status'] ?? '') === 'pass').length;
+    const warnCount = checks.filter((item) => String(item['status'] ?? '') === 'warn').length;
+    const failCount = checks.filter((item) => String(item['status'] ?? '') === 'fail').length;
+    return {
+      passCount,
+      warnCount,
+      failCount,
+      text: `통과 ${passCount} / 경고 ${warnCount} / 실패 ${failCount}`,
+    };
+  }
+
+  const passCount = Number(source['passCount'] ?? source['passedCount'] ?? 0);
+  const warnCount = Number(source['warnCount'] ?? source['warningCount'] ?? 0);
+  const failCount = Number(source['failCount'] ?? source['failedCount'] ?? 0);
+  return {
+    passCount,
+    warnCount,
+    failCount,
+    text: `통과 ${passCount} / 경고 ${warnCount} / 실패 ${failCount}`,
+  };
+}
+
+function normalizeDeploymentCandidates(
+  source: Record<string, unknown>,
+): Array<Record<string, unknown>> {
+  const candidateSources = [
+    source['candidates'],
+    source['requests'],
+    source['items'],
+    source['deployments'],
+    source['approvalQueue'],
+    source['suggestions'],
+    source['baselineCandidates'],
+    source['recentSuccessfulDeployments'],
+  ];
+
+  for (const value of candidateSources) {
+    const candidates = asRecordList(value);
+    if (candidates.length > 0) return candidates;
+  }
+
+  const single =
+    asRecord(source['baseline']) ||
+    asRecord(source['selectedDeployment']) ||
+    asRecord(source['deployment']) ||
+    asRecord(source['request']) ||
+    asRecord(source['candidate']);
+
+  return single ? [single] : [];
+}
+
+function renderQueueState(status: string): string {
+  switch (status) {
+    case 'approval_requested':
+      return '승인 대기';
+    case 'started':
+      return '시작됨';
+    case 'approved':
+    case 'held':
+    case 'expired':
+      return statusLabel(status);
+    case 'approval_pending':
+      return '승인 대기';
+    default:
+      return statusLabel(status);
+  }
+}
+
+export function buildDeploymentApprovalInboxCard(cardData: Record<string, unknown>): A2UICardDef {
+  const candidates = normalizeDeploymentCandidates(cardData).slice(0, 5);
+  const queueState = String(cardData['state'] ?? cardData['status'] ?? 'approval_pending');
+  const totalCount = candidates.length;
+  const actionableCount = candidates.filter((candidate) => String(candidate['status'] ?? candidate['state'] ?? 'approval_pending') === 'approval_pending').length;
+  const summary = totalCount > 0
+    ? `지금 처리할 수 있는 배포 요청 ${actionableCount}건`
+    : '현재 승인 대기 배포가 없습니다.';
+
+  const serviceScope = pickText(
+    cardData,
+    ['service_name', 'service', 'service_id'],
+    candidates[0]
+      ? pickText(candidates[0], ['service_name', 'service', 'service_id'], '전체 서비스')
+      : '전체 서비스',
+  );
+  const envScope = pickText(
+    cardData,
+    ['environment', 'env'],
+    candidates[0]
+      ? pickText(candidates[0], ['environment', 'env'], '전체 환경')
+      : '전체 환경',
+  );
+
+  const headerComponents: A2UIComponent[] = [
+    mkIcon('inbox_icon', 'inbox'),
+    mkText('inbox_eyebrow', 'A2UI · 배포 승인 Inbox', 'caption'),
+    mkText('inbox_title', '승인 대기 배포', 'h2'),
+    mkText('inbox_summary', summary, 'caption'),
+    mkText('inbox_scope', `${serviceScope} · ${envScope}`, 'caption'),
+    mkDivider('inbox_div_top'),
+    mkCol('inbox_header_col', ['inbox_icon', 'inbox_eyebrow', 'inbox_title', 'inbox_summary', 'inbox_scope', 'inbox_div_top']),
+  ];
+
+  const rowCardIds: string[] = [];
+  const rowComponents: A2UIComponent[] = [];
+  const rowsData: Array<Record<string, unknown>> = [];
+
+  candidates.forEach((candidate, index) => {
+    const candidateId = asText(candidate['id'] ?? candidate['deployment_id'] ?? candidate['request_id'] ?? `approval-${index}`);
+    const service = pickText(candidate, ['service_name', 'service', 'service_id'], serviceScope);
+    const serviceId = pickText(candidate, ['service_id', 'serviceId'], service);
+    const environment = pickText(candidate, ['environment', 'env'], envScope);
+    const version = pickText(candidate, ['version', 'target_version', 'current_version'], 'N/A');
+    const requestor = pickText(candidate, ['requestor', 'requested_by', 'requestedBy', 'owner'], 'N/A');
+    const requestedAt = pickText(candidate, ['requested_at', 'requestedAt', 'created_at', 'submitted_at'], '-');
+    const risk = normalizeRiskSummary(candidate);
+    const changeSize = pickText(
+      candidate,
+      ['change_size_summary', 'changeSizeSummary', 'change_size', 'diff_summary', 'change_summary'],
+      '변경 규모 정보 없음',
+    );
+    const recentSignal = pickText(
+      candidate,
+      ['recent_failure_indicator', 'failure_indicator', 'recentFailureIndicator', 'rollback_indicator', 'recentSignal'],
+      '',
+    );
+    const status = String(candidate['state'] ?? candidate['status'] ?? 'approval_pending');
+    const canApprove = pickBool(candidate, ['canApprove'], true);
+    const isApproved = ['approved', 'held', 'expired'].includes(status);
+    const isRisky = risk.failCount > 0;
+    const isActionable = !isApproved && status === 'approval_pending';
+    const detailPrimary = isRisky || !canApprove || !isActionable;
+    const statusText = renderQueueState(status);
+    const stateNote = isApproved
+      ? '승인완료'
+      : isRisky
+        ? '실패 신호가 있어 상세 검토를 우선 권장합니다.'
+        : '바로 승인할 수 있습니다.';
+
+    const headerId = `inbox_${index}_header`;
+    const titleId = `inbox_${index}_title`;
+    const statusId = `inbox_${index}_status`;
+    const metaId = `inbox_${index}_meta`;
+    const requesterId = `inbox_${index}_requester`;
+    const riskId = `inbox_${index}_risk`;
+    const noteId = `inbox_${index}_note`;
+    const rowColId = `inbox_${index}_col`;
+    const rowCardId = `inbox_${index}_card`;
+    const actionsRowId = `inbox_${index}_actions`;
+
+    rowComponents.push(
+      mkIcon(`inbox_${index}_icon`, statusIcon(status)),
+      mkText(titleId, `${service} · ${environment} · ${version}`, 'h4'),
+      mkText(statusId, statusText, 'caption'),
+      mkRow(headerId, [`inbox_${index}_icon`, titleId, statusId], 'spaceBetween'),
+      mkText(metaId, `요청 시각: ${requestedAt}`, 'caption'),
+      mkText(requesterId, `배포자: ${requestor}`, 'caption'),
+      mkText(riskId, `${risk.text} · ${changeSize}${recentSignal ? ` · ${recentSignal}` : ''}`, 'caption'),
+      mkText(noteId, stateNote, 'caption'),
+    );
+
+    const actionIds: string[] = [];
+    if (canApprove && isActionable) {
+      rowComponents.push(
+        mkText(`inbox_${index}_approve_text`, '승인'),
+        mkButton(
+          `inbox_${index}_approve_btn`,
+          `inbox_${index}_approve_text`,
+          'approve_deployment_request',
+          {
+            requestId: candidateId,
+            candidateId,
+            deploymentId: pickText(candidate, ['baseline_deployment_id', 'deployment_id'], ''),
+            serviceId,
+            environment,
+            version,
+            status,
+          },
+          !detailPrimary,
+        ),
+      );
+      actionIds.push(`inbox_${index}_approve_btn`);
+    }
+
+    rowComponents.push(
+      mkText(`inbox_${index}_detail_text`, '상세 보기'),
+      mkButton(
+        `inbox_${index}_detail_btn`,
+        `inbox_${index}_detail_text`,
+        'view_deployment_request',
+        {
+          requestId: candidateId,
+          candidateId,
+          deploymentId: pickText(candidate, ['baseline_deployment_id', 'deployment_id'], ''),
+          serviceId,
+          environment,
+          version,
+          status,
+        },
+        detailPrimary,
+      ),
+    );
+    actionIds.push(`inbox_${index}_detail_btn`);
+
+    rowComponents.push(
+      mkRow(actionsRowId, actionIds, 'end'),
+      mkCol(rowColId, [headerId, metaId, requesterId, riskId, noteId, actionsRowId]),
+      mkCard(rowCardId, rowColId),
+      mkDivider(`inbox_${index}_divider`),
+    );
+    rowCardIds.push(rowCardId);
+    rowsData.push({
+      id: candidateId,
+      service_id: service,
+      environment,
+      version,
+      status,
+      requestor,
+      requested_at: requestedAt,
+      risk_summary: risk.text,
+      change_size_summary: changeSize,
+      recent_signal: recentSignal,
+    });
+  });
+
+  const emptyComponents: A2UIComponent[] = [];
+  let emptyChildId = '';
+  if (candidates.length === 0) {
+    emptyChildId = 'inbox_empty_col';
+    emptyComponents.push(
+      mkIcon('inbox_empty_icon', 'inbox'),
+      mkText('inbox_empty_title', '현재 승인 대기 배포가 없습니다.', 'h4'),
+      mkText('inbox_empty_detail', '새 승인 요청이 들어오면 이 카드에서 바로 처리할 수 있습니다.', 'caption'),
+      mkText('inbox_empty_action_text', '배포 페이지로 이동'),
+      mkButton(
+        'inbox_empty_action_btn',
+        'inbox_empty_action_text',
+        'open_deployments_page',
+        { view: 'approval_queue', scope: 'pending' },
+        true,
+      ),
+      mkCol(emptyChildId, ['inbox_empty_icon', 'inbox_empty_title', 'inbox_empty_detail', 'inbox_empty_action_btn']),
+    );
+  }
+
+  const listChildren = candidates.length > 0 ? rowCardIds : [emptyChildId];
+
+  const components: A2UIComponent[] = [
+    ...headerComponents,
+    ...rowComponents,
+    ...emptyComponents,
+    mkList('inbox_list', listChildren, 'vertical'),
+    mkCol('main_col', [
+      'inbox_header_col',
+      'inbox_list',
+    ]),
+    mkCard('root_card', 'main_col'),
+  ];
+
+  return {
+    root: 'root_card',
+    components,
+    data: {
+      queue: {
+        state: queueState,
+        totalCount,
+        actionableCount,
+        service: serviceScope,
+        environment: envScope,
+      },
+      approvals: rowsData,
+    },
+  };
+}
+
+// ─── 8. Quick Deploy Launchpad ─────────────────────────────────────────────
+
+function normalizeLaunchpadSuggestions(source: Record<string, unknown>): Array<Record<string, unknown>> {
+  return normalizeDeploymentCandidates(source).slice(0, 3);
+}
+
+export function buildQuickDeployLaunchpadCard(cardData: Record<string, unknown>): A2UICardDef {
+  const baseline = asRecord(cardData['baseline']) ?? asRecord(cardData['selectedDeployment']) ?? asRecord(cardData['deployment']);
+  const suggestions = normalizeLaunchpadSuggestions(cardData);
+  const service = pickText(
+    cardData,
+    ['service_name', 'service', 'service_id'],
+    baseline ? pickText(baseline, ['service_name', 'service', 'service_id'], '대상 서비스') : '대상 서비스',
+  );
+  const serviceId = pickText(
+    cardData,
+    ['service_id', 'serviceId'],
+    baseline ? pickText(baseline, ['service_id', 'serviceId'], service) : service,
+  );
+  const environment = pickText(
+    cardData,
+    ['environment', 'env'],
+    baseline ? pickText(baseline, ['environment', 'env'], '대상 환경') : '대상 환경',
+  );
+  const baselineVersion = pickText(
+    cardData,
+    ['baselineVersion', 'baseline_version', 'version', 'current_version'],
+    baseline ? pickText(baseline, ['version', 'current_version', 'baseline_version'], 'N/A') : 'N/A',
+  );
+  const lastSuccessfulAt = pickText(
+    cardData,
+    ['lastSuccessfulDeployAt', 'last_successful_deploy_at', 'last_deployed_at', 'last_success_at'],
+    baseline ? pickText(baseline, ['deployed_at', 'updated_at', 'created_at', 'completed_at'], 'N/A') : 'N/A',
+  );
+  const rolloutStrategy = pickText(
+    cardData,
+    ['rolloutStrategy', 'rollout_strategy', 'strategy'],
+    baseline ? pickText(baseline, ['rollout_strategy', 'strategy'], 'canary 10 -> 50 -> 100') : 'canary 10 -> 50 -> 100',
+  );
+  const requestedBy = pickText(
+    cardData,
+    ['requestedBy', 'requested_by', 'requestor'],
+    baseline ? pickText(baseline, ['requested_by', 'requestor', 'requestedBy'], '현재 사용자') : '현재 사용자',
+  );
+  const risk = normalizeRiskSummary(
+    baseline ? { ...baseline, ...cardData } : cardData,
+  );
+  const baselineStatus = pickText(
+    cardData,
+    ['baselineStatus', 'baseline_status', 'status'],
+    baseline ? pickText(baseline, ['status', 'state'], 'succeeded') : 'suggested',
+  );
+  const state = pickText(
+    cardData,
+    ['state'],
+    baseline ? pickText(baseline, ['state'], 'suggested') : 'suggested',
+  );
+  const approvalRequired = pickBool(
+    baseline ? { ...baseline, ...cardData } : cardData,
+    ['approvalRequired', 'approval_required'],
+    false,
+  );
+  const canImmediateStart = pickBool(
+    baseline ? { ...baseline, ...cardData } : cardData,
+    ['canImmediateStart', 'can_start_now'],
+    false,
+  );
+  const baselineReady = ['succeeded', 'success', 'done', 'completed', 'approved'].includes(baselineStatus);
+  const showImmediateStart = canImmediateStart && baselineReady && risk.failCount === 0 && !approvalRequired;
+  const showSuggestions = suggestions.length > 1 || !baseline || baselineVersion === 'N/A';
+  const summary = baseline
+    ? '여러 페이지를 거치던 배포 시작을 2단계 카드 흐름으로 압축했습니다.'
+    : '기준 배포를 찾지 못해 먼저 후보를 고르는 단계가 필요합니다.';
+  const statusText = renderQueueState(state);
+  const step1State =
+    state === 'draft_created' || state === 'approval_requested' || state === 'started'
+      ? 'completed'
+      : baseline
+        ? 'active'
+        : 'blocked';
+  const step2State =
+    state === 'started' || state === 'approval_requested'
+      ? 'completed'
+      : state === 'draft_created'
+        ? 'active'
+        : 'blocked';
+  const step1Badge =
+    step1State === 'completed' ? 'Step 1 완료' : step1State === 'active' ? 'Step 1 진행 중' : 'Step 1 대기';
+  const step2Badge =
+    step2State === 'completed' ? 'Step 2 완료' : step2State === 'active' ? 'Step 2 진행 중' : 'Step 2 대기';
+  const flowSummary =
+    step2State === 'completed'
+      ? state === 'started'
+        ? '배포가 시작된 상태입니다.'
+        : '승인 요청이 생성된 상태입니다.'
+      : step2State === 'active'
+        ? '초안 생성이 끝나서 실행 단계로 넘어갈 수 있습니다.'
+        : '먼저 기준 배포를 확인하고 초안을 생성해야 합니다.';
+
+  const titleIcon = baseline ? 'rocket_launch' : 'travel_explore';
+  const headerComponents: A2UIComponent[] = [
+    mkIcon('launch_icon', titleIcon),
+    mkText('launch_eyebrow', 'A2UI · 간단 배포 시작', 'caption'),
+    mkText('launch_title', '새 배포 시작', 'h2'),
+    mkText('launch_summary', summary, 'caption'),
+    mkText('launch_status', `${statusText} · 요청자 ${requestedBy}`, 'caption'),
+    mkText('launch_flow_title', '배포 시작 플로우', 'h4'),
+    mkText('launch_flow_detail', flowSummary, 'caption'),
+    mkDivider('launch_div_top'),
+    mkCol('launch_header_col', [
+      'launch_icon',
+      'launch_eyebrow',
+      'launch_title',
+      'launch_summary',
+      'launch_status',
+      'launch_flow_title',
+      'launch_flow_detail',
+      'launch_div_top',
+    ]),
+  ];
+
+  const launchRows = [
+    mkInfoRow('launch_svc', 'dns', '서비스', { kind: 'text', text: service }),
+    mkInfoRow('launch_env', 'cloud', '환경', { kind: 'text', text: environment }),
+    mkInfoRow('launch_ver', 'tag', '기준 버전', { kind: 'text', text: baselineVersion }),
+    mkInfoRow('launch_time', 'schedule', '최근 성공 배포', { kind: 'text', text: lastSuccessfulAt }),
+    mkInfoRow('launch_strat', 'speed', '전략', { kind: 'text', text: rolloutStrategy }),
+    mkInfoRow('launch_risk', statusIcon(risk.failCount > 0 ? 'fail' : risk.warnCount > 0 ? 'warn' : 'pass'), '최근 체크', {
+      kind: 'text',
+      text: risk.text,
+    }),
+    mkInfoRow('launch_req', 'person', '요청자', { kind: 'text', text: requestedBy }),
+  ];
+
+  const launchRowsCol = mkCol('launch_rows_col', launchRows.map((row) => row.rowId));
+  const launchRowComponents = launchRows.flatMap((row) => row.components);
+
+  const stepComponents: A2UIComponent[] = [];
+  const stepCardIds: string[] = [];
+
+  if (baseline && baselineVersion !== 'N/A') {
+    stepComponents.push(
+      mkText('launch_step_1_label', step1Badge, 'caption'),
+      mkText('launch_step_1_title', '기준 배포 확인 및 초안 생성', 'h3'),
+      mkText(
+        'launch_step_1_detail',
+        step1State === 'completed'
+          ? '기준 배포와 기본 전략이 확정되었고 초안 생성 단계가 완료되었습니다.'
+          : '기준 배포, 환경, 전략을 확인한 뒤 배포 초안을 생성합니다.',
+        'caption',
+      ),
+      launchRowsCol,
+      mkText('launch_step_1_action_text', step1State === 'completed' ? '초안 생성됨' : '초안 생성'),
+      mkButton(
+        'launch_step_1_action_btn',
+        'launch_step_1_action_text',
+        'create_deploy_draft',
+        {
+          baselineDeploymentId: pickText(baseline ?? {}, ['baseline_deployment_id', 'id', 'deployment_id'], ''),
+          serviceId,
+          environment,
+          version: baselineVersion,
+          strategy: rolloutStrategy,
+        },
+        step1State !== 'completed',
+      ),
+      mkCol('launch_step_1_col', [
+        'launch_step_1_label',
+        'launch_step_1_title',
+        'launch_step_1_detail',
+        'launch_rows_col',
+        'launch_step_1_action_btn',
+      ]),
+      mkCard('launch_step_1_card', 'launch_step_1_col'),
+    );
+    stepCardIds.push('launch_step_1_card');
+
+    const step2ActionIds: string[] = [];
+    stepComponents.push(
+      mkText('launch_step_2_label', step2State === 'completed' ? 'Step 2 완료' : 'Step 2'),
+      mkText('launch_step_2_title', '승인 요청 또는 바로 시작', 'h3'),
+      mkText(
+        'launch_step_2_detail',
+        step2State === 'blocked'
+          ? '초안이 생성되면 승인 요청 또는 즉시 시작 단계로 이어집니다.'
+          : showImmediateStart
+            ? '초안이 준비되었습니다. 승인 요청을 보내거나 바로 배포를 시작할 수 있습니다.'
+            : '초안이 준비되었습니다. 승인 요청을 보내 다음 단계로 진행합니다.',
+        'caption',
+      ),
+    );
+
+    if (step2State !== 'blocked') {
+      stepComponents.push(
+        mkText('launch_step_2_approve_text', state === 'approval_requested' ? '승인 요청됨' : '승인 요청'),
+        mkButton(
+          'launch_step_2_approve_btn',
+          'launch_step_2_approve_text',
+          'request_deploy_approval',
+          {
+            baselineDeploymentId: pickText(baseline ?? {}, ['baseline_deployment_id', 'id', 'deployment_id'], ''),
+            serviceId,
+            environment,
+            version: baselineVersion,
+            strategy: rolloutStrategy,
+          },
+          !showImmediateStart || state === 'approval_requested',
+        ),
+      );
+      step2ActionIds.push('launch_step_2_approve_btn');
+
+      if (showImmediateStart) {
+        stepComponents.push(
+          mkText('launch_step_2_start_text', state === 'started' ? '배포 시작됨' : '즉시 시작'),
+          mkButton(
+            'launch_step_2_start_btn',
+            'launch_step_2_start_text',
+            'start_quick_deploy',
+            {
+              baselineDeploymentId: pickText(baseline ?? {}, ['baseline_deployment_id', 'id', 'deployment_id'], ''),
+              serviceId,
+              environment,
+              version: baselineVersion,
+              strategy: rolloutStrategy,
+            },
+            state !== 'started',
+          ),
+        );
+        step2ActionIds.push('launch_step_2_start_btn');
+      }
+    }
+
+    stepComponents.push(
+      mkText('launch_step_2_detail_text', '상세 설정으로 이동'),
+      mkButton('launch_step_2_detail_btn', 'launch_step_2_detail_text', 'open_deployments_page', {
+        serviceId,
+        environment,
+        version: baselineVersion,
+        view: 'deployment_details',
+      }),
+      mkRow('launch_step_2_actions', [...step2ActionIds, 'launch_step_2_detail_btn'], 'end'),
+      mkCol('launch_step_2_col', [
+        'launch_step_2_label',
+        'launch_step_2_title',
+        'launch_step_2_detail',
+        'launch_step_2_actions',
+      ]),
+      mkCard('launch_step_2_card', 'launch_step_2_col'),
+    );
+    stepCardIds.push('launch_step_2_card');
+  }
+
+  const suggestionComponents: A2UIComponent[] = [];
+  const suggestionRowIds: string[] = [];
+  if (showSuggestions) {
+    suggestionComponents.push(
+      mkDivider('launch_sugg_div'),
+      mkText('launch_sugg_title', '추천 기준 배포', 'h3'),
+      mkText('launch_sugg_detail', '기준값이 비어 있어 최근 성공 배포 후보를 먼저 확인하세요.', 'caption'),
+    );
+
+    suggestions.forEach((candidate, index) => {
+      const candidateId = asText(candidate['id'] ?? candidate['deployment_id'] ?? `suggestion-${index}`);
+      const candidateService = pickText(candidate, ['service_name', 'service', 'service_id'], service);
+      const candidateEnv = pickText(candidate, ['environment', 'env'], environment);
+      const candidateVersion = pickText(candidate, ['version', 'current_version', 'baseline_version'], 'N/A');
+      const candidateTime = pickText(candidate, ['deployed_at', 'completed_at', 'updated_at', 'created_at'], 'N/A');
+      const candidateStatus = pickText(candidate, ['status', 'state'], 'succeeded');
+      const suggestionHeaderId = `launch_sugg_${index}_header`;
+      const suggestionMetaId = `launch_sugg_${index}_meta`;
+      const suggestionActionId = `launch_sugg_${index}_action`;
+      const suggestionCardId = `launch_sugg_${index}_card`;
+      const suggestionColId = `launch_sugg_${index}_col`;
+
+      suggestionComponents.push(
+        mkIcon(`launch_sugg_${index}_icon`, statusIcon(candidateStatus)),
+        mkText(`launch_sugg_${index}_title`, `${candidateService} · ${candidateEnv} · ${candidateVersion}`, 'h4'),
+        mkText(suggestionMetaId, `최근 성공 배포 ${candidateTime}`, 'caption'),
+        mkText(`launch_sugg_${index}_status`, statusLabel(candidateStatus), 'caption'),
+        mkRow(suggestionHeaderId, [`launch_sugg_${index}_icon`, `launch_sugg_${index}_title`, `launch_sugg_${index}_status`], 'spaceBetween'),
+        mkText(`launch_sugg_${index}_text`, '이 항목을 기준 배포로 사용할 수 있습니다.', 'caption'),
+        mkText(`launch_sugg_${index}_select_text`, '선택'),
+        mkButton(
+          `launch_sugg_${index}_select_btn`,
+          `launch_sugg_${index}_select_text`,
+          'select_deploy_baseline',
+          {
+            candidateId,
+            deploymentId: candidateId,
+            serviceId: candidateService,
+            environment: candidateEnv,
+            version: candidateVersion,
+          },
+          true,
+        ),
+        mkRow(suggestionActionId, [`launch_sugg_${index}_select_btn`], 'end'),
+        mkCol(suggestionColId, [
+          suggestionHeaderId,
+          suggestionMetaId,
+          `launch_sugg_${index}_text`,
+          suggestionActionId,
+        ]),
+        mkCard(suggestionCardId, suggestionColId),
+      );
+      suggestionRowIds.push(suggestionCardId);
+    });
+  }
+
+  const emptyComponents: A2UIComponent[] = [];
+  let emptyColId = '';
+  if (!baseline && suggestions.length === 0) {
+    emptyColId = 'launch_empty_col';
+    emptyComponents.push(
+      mkIcon('launch_empty_icon', 'info'),
+      mkText('launch_empty_title', '배포 기준을 찾지 못했습니다.', 'h4'),
+      mkText('launch_empty_detail', '최근 성공 배포 정보가 없어 새 배포 초안을 만들기 전에 배포 페이지에서 기준을 확인하세요.', 'caption'),
+      mkText('launch_empty_action_text', '배포 페이지로 이동'),
+      mkButton(
+        'launch_empty_action_btn',
+        'launch_empty_action_text',
+        'open_deployments_page',
+        { view: 'deployment_launchpad', scope: 'latest-success' },
+        true,
+      ),
+      mkCol(emptyColId, ['launch_empty_icon', 'launch_empty_title', 'launch_empty_detail', 'launch_empty_action_btn']),
+    );
+  }
+
+  const actionComponents: A2UIComponent[] = [];
+  if (!baseline && suggestions.length > 0) {
+    actionComponents.push(
+      mkText('launch_go_text', '배포 페이지로 이동'),
+      mkButton('launch_go_btn', 'launch_go_text', 'open_deployments_page', {
+        view: 'deployment_launchpad',
+        scope: 'suggestions',
+      }, true),
+    );
+  }
+
+  const components: A2UIComponent[] = [
+    ...headerComponents,
+    ...launchRowComponents,
+    ...stepComponents,
+    ...suggestionComponents,
+    ...emptyComponents,
+    ...actionComponents,
+    ...(suggestionRowIds.length > 0 ? [mkList('launch_sugg_list', suggestionRowIds, 'vertical')] : []),
+    ...(stepCardIds.length > 0 ? [mkList('launch_steps_list', stepCardIds, 'vertical')] : []),
+    mkCol('main_col', [
+      'launch_header_col',
+      ...(stepCardIds.length > 0 ? ['launch_steps_list'] : []),
+      ...(suggestionRowIds.length > 0 ? ['launch_sugg_div', 'launch_sugg_title', 'launch_sugg_detail', 'launch_sugg_list'] : []),
+      ...(emptyColId ? ['launch_empty_col'] : []),
+      ...(!baseline && suggestions.length > 0 ? ['launch_go_btn'] : []),
+    ]),
+    mkCard('root_card', 'main_col'),
+  ];
+
+  return {
+    root: 'root_card',
+    components,
+    data: {
+      launchpad: {
+        state,
+        service,
+        environment,
+        baselineVersion,
+        lastSuccessfulAt,
+        rolloutStrategy,
+        requestedBy,
+        riskSummary: risk.text,
+      },
+      suggestions: suggestions.map((candidate) => ({
+        id: candidate['id'] ?? candidate['deployment_id'] ?? '',
+        service_id: pickText(candidate, ['service_id', 'serviceId'], serviceId),
+        environment: pickText(candidate, ['environment', 'env'], environment),
+        version: pickText(candidate, ['version', 'current_version', 'baseline_version'], 'N/A'),
+      })),
     },
   };
 }

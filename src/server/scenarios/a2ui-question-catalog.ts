@@ -1,4 +1,8 @@
-import type { A2UITemplateToolName } from '@/server/ai/template-config';
+import {
+  SEED_A2UI_TEMPLATES,
+  VISIBLE_A2UI_TEMPLATE_IDS,
+  type A2UITemplateToolName,
+} from '@/server/ai/template-config';
 import type { ScenarioId } from '@/server/scenarios';
 import type { OperatorRole } from '@/types/domain';
 
@@ -18,6 +22,9 @@ export interface A2UIScenarioQuestionCase {
   expectedToolName: A2UITemplateToolName;
   expectedCardType:
     | 'rollback_summary'
+    | 'rollback_action'
+    | 'deployment_approval_inbox'
+    | 'quick_deploy_launchpad'
     | 'evidence_comparison'
     | 'dry_run_stepper'
     | 'confirm_action'
@@ -38,6 +45,39 @@ export const A2UI_SCENARIO_QUESTION_CASES: A2UIScenarioQuestionCase[] = [
     expectedCardType: 'rollback_summary',
     toolArgs: { deploymentId: 'dep_checkout_prod_42' },
     note: 'dep_checkout_prod_42 기준 롤백 판단 요약 카드',
+  },
+  {
+    id: 'checkout-rollback-action',
+    scenarioId: 'checkout-5xx',
+    page: 'deployments',
+    operatorRole: 'release_manager',
+    question: 'checkout 롤백 후보를 카드로 보여줘',
+    expectedToolName: 'renderRollbackActionCard',
+    expectedCardType: 'rollback_action',
+    toolArgs: { deploymentId: 'dep_checkout_prod_42' },
+    note: 'dep_checkout_prod_42 기준 롤백 실행 후보 카드',
+  },
+  {
+    id: 'checkout-deployment-approval-inbox',
+    scenarioId: 'checkout-5xx',
+    page: 'deployments',
+    operatorRole: 'release_manager',
+    question: '지금 승인 대기 중인 배포 요청을 카드로 보여줘',
+    expectedToolName: 'renderDeploymentApprovalInboxCard',
+    expectedCardType: 'deployment_approval_inbox',
+    toolArgs: {},
+    note: '승인 대기 배포 inbox 카드',
+  },
+  {
+    id: 'checkout-quick-deploy-launchpad',
+    scenarioId: 'checkout-5xx',
+    page: 'deployments',
+    operatorRole: 'ops_engineer',
+    question: 'checkout 다시 배포할 수 있게 카드로 보여줘',
+    expectedToolName: 'renderQuickDeployLaunchpadCard',
+    expectedCardType: 'quick_deploy_launchpad',
+    toolArgs: { deploymentId: 'dep_checkout_prod_41' },
+    note: 'dep_checkout_prod_41 기준 간단 배포 시작 카드',
   },
   {
     id: 'checkout-evidence-comparison',
@@ -151,6 +191,16 @@ export const A2UI_SCENARIO_QUESTION_CASES: A2UIScenarioQuestionCase[] = [
   },
 ];
 
+const VISIBLE_TOOL_NAMES = new Set(
+  SEED_A2UI_TEMPLATES
+    .filter((template) =>
+      VISIBLE_A2UI_TEMPLATE_IDS.includes(
+        template.id as (typeof VISIBLE_A2UI_TEMPLATE_IDS)[number],
+      ),
+    )
+    .map((template) => template.toolName),
+);
+
 export function listScenarioA2UIQuestionCases(
   scenarioId: ScenarioId,
   page?: string,
@@ -158,6 +208,7 @@ export function listScenarioA2UIQuestionCases(
   return A2UI_SCENARIO_QUESTION_CASES.filter((item) => {
     if (item.scenarioId !== scenarioId) return false;
     if (page && item.page !== page) return false;
+    if (!VISIBLE_TOOL_NAMES.has(item.expectedToolName)) return false;
     return true;
   });
 }

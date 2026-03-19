@@ -131,6 +131,22 @@ function initSchema(db: Database.Database) {
       detail TEXT NOT NULL DEFAULT ''
     );
 
+    CREATE TABLE IF NOT EXISTS deployment_requests (
+      id TEXT PRIMARY KEY,
+      service_id TEXT NOT NULL REFERENCES services(id),
+      environment TEXT NOT NULL CHECK(environment IN ('production','staging','development')),
+      baseline_deployment_id TEXT NOT NULL REFERENCES deployments(id),
+      target_version TEXT NOT NULL,
+      strategy TEXT NOT NULL DEFAULT 'canary_10_50_100',
+      status TEXT NOT NULL CHECK(status IN ('draft','approval_requested','held','started','failed')) DEFAULT 'draft',
+      requested_by TEXT NOT NULL REFERENCES operators(id),
+      approved_by TEXT REFERENCES operators(id),
+      note TEXT NOT NULL DEFAULT '',
+      result_deployment_id TEXT REFERENCES deployments(id),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     -- Jobs
     CREATE TABLE IF NOT EXISTS job_templates (
       id TEXT PRIMARY KEY,
@@ -342,6 +358,8 @@ function initSchema(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_incidents_service ON incidents(service_id);
     CREATE INDEX IF NOT EXISTS idx_deployments_status ON deployments(status);
     CREATE INDEX IF NOT EXISTS idx_deployments_service ON deployments(service_id);
+    CREATE INDEX IF NOT EXISTS idx_deployment_requests_status ON deployment_requests(status);
+    CREATE INDEX IF NOT EXISTS idx_deployment_requests_service ON deployment_requests(service_id);
     CREATE INDEX IF NOT EXISTS idx_audit_logs_target ON audit_logs(target_type, target_id);
     CREATE INDEX IF NOT EXISTS idx_audit_logs_actor ON audit_logs(actor_id);
     CREATE INDEX IF NOT EXISTS idx_job_runs_status ON job_runs(status);
@@ -591,6 +609,51 @@ export function getRollbackPlan(deploymentId: string) {
 
 export function getRollbackSteps(rollbackPlanId: string) {
   return getDb().prepare('SELECT * FROM rollback_steps WHERE rollback_plan_id = ? ORDER BY step_order').all(rollbackPlanId);
+}
+
+export function getDeploymentRequest(id: string) {
+  return getDb().prepare('SELECT * FROM deployment_requests WHERE id = ?').get(id);
+}
+
+export function getAllDeploymentRequests(filters?: {
+  status?: string;
+  serviceId?: string;
+  environment?: string;
+  requestedBy?: string;
+  limit?: number;
+}) {
+  let sql = 'SELECT * FROM deployment_requests WHERE 1=1';
+  const params: (string | number)[] = [];
+  if (filters?.status) {
+    sql += ' AND status = ?';
+    params.push(filters.status);
+  }
+  if (filters?.serviceId) {
+    sql += ' AND service_id = ?';
+    params.push(filters.serviceId);
+  }
+  if (filters?.environment) {
+    sql += ' AND environment = ?';
+    params.push(filters.environment);
+  }
+  if (filters?.requestedBy) {
+    sql += ' AND requested_by = ?';
+    params.push(filters.requestedBy);
+  }
+  sql += ' ORDER BY created_at DESC';
+  if (typeof filters?.limit === 'number') {
+    sql += ' LIMIT ?';
+    params.push(filters.limit);
+  }
+  return getDb().prepare(sql).all(...params);
+}
+
+export function getLatestDeploymentRequestForBaseline(baselineDeploymentId: string) {
+  return getDb()
+    .prepare(
+      'SELECT * FROM deployment_requests WHERE baseline_deployment_id = ? ORDER BY created_at DESC LIMIT 1',
+    )
+    .get(baselineDeploymentId);
 }
 
 export function getAllJobTemplates() {

@@ -4,11 +4,14 @@ import dynamic from "next/dynamic";
 import { Component, type ErrorInfo, type ReactNode } from "react";
 import {
   buildRollbackSummaryCard,
+  buildRollbackActionCard,
   buildEvidenceComparisonCard,
   buildDryRunStepperCard,
   buildConfirmActionCard,
   buildJobSpecReviewCard,
   buildReportTemplateCard,
+  buildDeploymentApprovalInboxCard,
+  buildQuickDeployLaunchpadCard,
   type A2UICardDef,
 } from "@/lib/a2ui-bridge";
 
@@ -95,6 +98,12 @@ function buildCardDef(
           (cardData["approvalStatus"] as Record<string, unknown>) ?? null,
       });
     }
+    case "rollback_action":
+      return buildRollbackActionCard(cardData);
+    case "deployment_approval_inbox":
+      return buildDeploymentApprovalInboxCard(cardData);
+    case "quick_deploy_launchpad":
+      return buildQuickDeployLaunchpadCard(cardData);
     case "evidence_comparison": {
       const incident = (cardData["incident"] as Record<string, unknown>) ?? {};
       const evidence = (cardData["evidence"] as Array<Record<string, unknown>>) ?? [];
@@ -176,7 +185,10 @@ function buildCardDef(
 // ─── Card type labels ────────────────────────────────────────────────────────
 
 const CARD_TYPE_LABELS: Record<string, string> = {
+  deployment_approval_inbox: "배포 승인 Inbox",
+  quick_deploy_launchpad: "간단 배포 시작",
   rollback_summary: "롤백 판단 요약",
+  rollback_action: "롤백 실행",
   evidence_comparison: "증거 비교 분석",
   dry_run_stepper: "Dry-Run 단계 확인",
   confirm_action: "실행 확인",
@@ -225,7 +237,7 @@ export function A2UICardRenderer({
 
   return (
     <A2UIErrorBoundary cardType={cardType}>
-      <div className="rounded-lg border border-border/50 bg-card overflow-hidden">
+      <div className="rounded-lg border border-border/50 bg-card overflow-hidden" data-card-type={cardType}>
         {label && (
           <div className="px-3 py-1.5 border-b border-border/30 bg-muted/30">
             <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
@@ -254,6 +266,7 @@ export function A2UICardRenderer({
           root={cardDef.root}
           components={cardDef.components}
           data={cardDef.data}
+          className="ops-a2ui"
           onAction={(action) => {
             if (onAction) {
               onAction(action.actionName, {

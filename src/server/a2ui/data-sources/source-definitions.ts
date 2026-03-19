@@ -1,6 +1,8 @@
 import {
   getA2UIDataSourceOverrides,
   getAllIncidents,
+  getAllDeployments,
+  getAllDeploymentRequests,
   getAllJobTemplates,
   getDeployment,
   getDeploymentDiffs,
@@ -11,8 +13,11 @@ import {
   getIncidentEvidence,
   getJobRun,
   getJobRunEvents,
+  getLatestDeploymentRequestForBaseline,
+  getService,
   getRollbackPlan,
   getRollbackSteps,
+  getOperator,
 } from "@/server/db";
 import type { DataSourceDef } from "./source-types";
 
@@ -26,6 +31,344 @@ function parseJsonString(value: unknown) {
   } catch {
     return value;
   }
+}
+
+const ACTIVE_INCIDENT_STATUSES = new Set(["open", "investigating", "mitigated"]);
+
+function asText(value: unknown, fallback = "") {
+  if (value === null || value === undefined) {
+    return fallback;
+  }
+
+  const text = String(value).trim();
+  return text.length > 0 ? text : fallback;
+}
+
+function toTimestamp(value: unknown) {
+  const text = asText(value, "");
+  if (!text) {
+    return 0;
+  }
+
+  const timestamp = Date.parse(text);
+  return Number.isNaN(timestamp) ? 0 : timestamp;
+}
+
+function summarizeChecks(checks: Array<Record<string, unknown>>) {
+  const failed = checks
+    .filter((check) => String(check["status"] ?? "") === "fail")
+    .map((check) => asText(check["check_name"], "검사"));
+  const warned = checks
+    .filter((check) => String(check["status"] ?? "") === "warn")
+    .map((check) => asText(check["check_name"], "검사"));
+
+  return {
+    failed,
+    warned,
+    summary:
+      failed.length > 0
+        ? `실패 ${failed.length}개: ${failed.slice(0, 2).join(", ")}`
+        : warned.length > 0
+          ? `경고 ${warned.length}개: ${warned.slice(0, 2).join(", ")}`
+          : "위험 체크 모두 통과",
+  };
+}
+
+function getActiveIncidentContext(serviceId: string) {
+  const incidents = (getAllIncidents({ serviceId }) as Array<Record<string, unknown>>).filter(
+    (incident) => ACTIVE_INCIDENT_STATUSES.has(String(incident["status"] ?? "")),
+  );
+
+  const environment = asText(incidents[0]?.["environment"], "");
+  return {
+    count: incidents.length,
+    environment,
+    incidents,
+  };
+}
+
+function calculateRollbackCandidateScore(input: {
+  deployment: Record<string, unknown>;
+  activeIncidentEnvironment: string;
+  activeIncidentCount: number;
+  planStatus: string;
+}) {
+  const status = asText(input.deployment["status"], "");
+  const previousVersion = asText(input.deployment["previous_version"], "");
+  const environment = asText(input.deployment["environment"], "");
+  const createdAt = toTimestamp(input.deployment["created_at"]);
+
+  let score = 0;
+  if (status === "failed") score += 500;
+  else if (status === "running") score += 400;
+  else if (status === "pending") score += 300;
+  else if (status === "succeeded") score += 200;
+  else if (status === "rolled_back") score -= 1000;
+
+  if (previousVersion) score += 120;
+  if (input.activeIncidentEnvironment && environment === input.activeIncidentEnvironment) score += 80;
+  if (input.activeIncidentCount > 0) score += 30;
+  if (input.planStatus === "approved") score += 40;
+  else if (input.planStatus === "draft") score -= 10;
+
+  if (createdAt > 0) {
+    score += Math.max(0, 120 - Math.min(120, Math.floor((Date.now() - createdAt) / 86400000)));
+  }
+
+  return score;
+}
+
+function buildRollbackCandidate(
+  deployment: Record<string, unknown>,
+  options: {
+    serviceName: string;
+    activeIncidentEnvironment: string;
+    activeIncidentCount: number;
+    anchorDeploymentId: string;
+    anchorPreviousVersion: string;
+  },
+) {
+  const deploymentId = asText(deployment["id"], "");
+  const serviceId = asText(deployment["service_id"], "");
+  const environment = asText(deployment["environment"], "");
+  const version = asText(deployment["version"], "");
+  const previousVersion = asText(deployment["previous_version"], "");
+  const rollbackPlan = getRollbackPlan(deploymentId) as Record<string, unknown> | undefined;
+  const riskChecks = getDeploymentRiskChecks(deploymentId) as Array<Record<string, unknown>>;
+  const { failed, warned, summary } = summarizeChecks(riskChecks);
+  const planStatus = asText(rollbackPlan?.["status"], "");
+  const hasPreviousVersion = previousVersion.length > 0;
+  const isAlreadyRolledBack = asText(deployment["status"], "") === "rolled_back";
+  const isPrimaryTarget = deploymentId === options.anchorDeploymentId;
+  const isDirectRecoveryTarget = version === options.anchorPreviousVersion;
+  const rollbackable = isPrimaryTarget && hasPreviousVersion && !isAlreadyRolledBack;
+
+  const signals: string[] = [];
+  if (options.activeIncidentCount > 0 && options.activeIncidentEnvironment === environment) {
+    signals.push(`활성 인시던트 환경 일치`);
+  } else if (options.activeIncidentCount > 0) {
+    signals.push(`활성 인시던트 ${options.activeIncidentCount}건`);
+  }
+  if (failed.length > 0) {
+    signals.push(`실패 체크 ${failed.slice(0, 2).join(", ")}`);
+  } else if (warned.length > 0) {
+    signals.push(`경고 체크 ${warned.slice(0, 2).join(", ")}`);
+  } else {
+    signals.push("위험 체크 통과");
+  }
+  if (planStatus) {
+    signals.push(`롤백 계획 ${planStatus}`);
+  }
+  if (!hasPreviousVersion) {
+    signals.push("이전 버전 없음");
+  }
+  if (isAlreadyRolledBack) {
+    signals.push("이미 롤백됨");
+  }
+
+  const candidateRole = isPrimaryTarget
+    ? "current_target"
+    : isDirectRecoveryTarget
+      ? "recovery_target"
+      : "history";
+
+  return {
+    id: deploymentId,
+    deployment_id: deploymentId,
+    service_id: serviceId,
+    service: options.serviceName,
+    service_name: options.serviceName,
+    environment,
+    env: environment,
+    version,
+    current_version: version,
+    previous_version: previousVersion,
+    previousVersion,
+    status: asText(deployment["status"], ""),
+    candidate_role: candidateRole,
+    primary_candidate: isPrimaryTarget,
+    available: rollbackable,
+    rollbackable,
+    plan_id: rollbackPlan?.["id"] ?? null,
+    rollback_plan_id: rollbackPlan?.["id"] ?? null,
+    plan_status: planStatus || null,
+    recentSignals: signals,
+    signalSummary: signals.join(" · "),
+    deployed_at: asText(deployment["updated_at"], asText(deployment["created_at"], "")),
+    created_at: asText(deployment["created_at"], ""),
+    updated_at: asText(deployment["updated_at"], ""),
+    rankScore: calculateRollbackCandidateScore({
+      deployment,
+      activeIncidentEnvironment: options.activeIncidentEnvironment,
+      activeIncidentCount: options.activeIncidentCount,
+      planStatus,
+    }),
+    riskSummary: summary,
+  };
+}
+
+function getRollbackCandidatesForDeployment(deploymentId: string) {
+  const deployment = getDeployment(deploymentId) as Record<string, unknown> | undefined;
+  if (!deployment) {
+    return [];
+  }
+
+  const serviceId = asText(deployment["service_id"], "");
+  const service = getService(serviceId) as Record<string, unknown> | undefined;
+  const serviceName = asText(service?.["name"], serviceId);
+  const activeIncidentContext = getActiveIncidentContext(serviceId);
+  const anchorPreviousVersion = asText(deployment["previous_version"], "");
+  const deployments = (getAllDeployments({ serviceId }) as Array<Record<string, unknown>>)
+    .slice(0, 12)
+    .map((item) =>
+      buildRollbackCandidate(item, {
+        serviceName,
+        activeIncidentEnvironment: activeIncidentContext.environment,
+        activeIncidentCount: activeIncidentContext.count,
+        anchorDeploymentId: deploymentId,
+        anchorPreviousVersion,
+      }),
+    )
+    .sort((left, right) => {
+      const leftPrimary = left.primary_candidate ? 1 : 0;
+      const rightPrimary = right.primary_candidate ? 1 : 0;
+      if (rightPrimary !== leftPrimary) {
+        return rightPrimary - leftPrimary;
+      }
+      const leftRecovery = left.candidate_role === "recovery_target" ? 1 : 0;
+      const rightRecovery = right.candidate_role === "recovery_target" ? 1 : 0;
+      if (rightRecovery !== leftRecovery) {
+        return rightRecovery - leftRecovery;
+      }
+      if (right.rankScore !== left.rankScore) {
+        return right.rankScore - left.rankScore;
+      }
+      return toTimestamp(right.created_at) - toTimestamp(left.created_at);
+    });
+
+  return deployments.slice(0, 4);
+}
+
+function summarizeChangeCounts(deploymentId: string) {
+  const diffs = getDeploymentDiffs(deploymentId) as Array<Record<string, unknown>>;
+  return {
+    totalFiles: diffs.length,
+    additions: diffs.reduce((sum, diff) => sum + Number(diff["additions"] ?? 0), 0),
+    deletions: diffs.reduce((sum, diff) => sum + Number(diff["deletions"] ?? 0), 0),
+  };
+}
+
+function getQuickDeployBaseline(input: { deploymentId: string; actorId: string }) {
+  const deployment = getDeployment(input.deploymentId) as Record<string, unknown> | undefined;
+  if (!deployment) {
+    return null;
+  }
+
+  const serviceId = asText(deployment["service_id"], "");
+  const service = getService(serviceId) as Record<string, unknown> | undefined;
+  const operator = getOperator(input.actorId) as Record<string, unknown> | undefined;
+  const riskChecks = getDeploymentRiskChecks(input.deploymentId) as Array<Record<string, unknown>>;
+  const { summary, failed, warned } = summarizeChecks(riskChecks);
+  const recentSuccessful = (getAllDeployments({
+    serviceId,
+    environment: asText(deployment["environment"], ""),
+    status: "succeeded",
+  }) as Array<Record<string, unknown>>)[0];
+  const latestRequest = getLatestDeploymentRequestForBaseline(input.deploymentId) as
+    | Record<string, unknown>
+    | undefined;
+
+  return {
+    baseline_deployment_id: input.deploymentId,
+    service_id: serviceId,
+    service_name: asText(service?.["name"], serviceId),
+    environment: asText(deployment["environment"], ""),
+    baseline_version: asText(deployment["version"], ""),
+    previous_version: asText(deployment["previous_version"], ""),
+    baseline_status: asText(deployment["status"], ""),
+    suggested_strategy: "canary 10 -> 50 -> 100",
+    recent_risk_summary: summary,
+    riskSummary: {
+      pass: riskChecks.filter((item) => String(item["status"] ?? "") === "pass").length,
+      warn: warned.length,
+      fail: failed.length,
+    },
+    last_successful_deployed_at: asText(
+      recentSuccessful?.["updated_at"],
+      asText(recentSuccessful?.["created_at"], ""),
+    ),
+    requested_by: asText(operator?.["name"], asText(operator?.["id"], input.actorId)),
+    latest_request_status: asText(latestRequest?.["status"], ""),
+    latest_request_id: asText(latestRequest?.["id"], ""),
+    approvalRequired: warned.length > 0 || failed.length > 0,
+    canImmediateStart:
+      ["release_manager", "ops_engineer"].includes(asText(operator?.["role"], "")) &&
+      asText(deployment["status"], "") === "succeeded" &&
+      failed.length === 0,
+  };
+}
+
+function getDeploymentApprovalQueue(input: { actorId: string; actorRole: string }) {
+  if (!["release_manager", "ops_engineer"].includes(input.actorRole)) {
+    return [];
+  }
+
+  const requests = getAllDeploymentRequests({
+    status: "approval_requested",
+    limit: 4,
+  }) as Array<Record<string, unknown>>;
+
+  return requests.map((request) => {
+    const baselineDeploymentId = asText(request["baseline_deployment_id"], "");
+    const deployment = getDeployment(baselineDeploymentId) as Record<string, unknown> | undefined;
+    const serviceId = asText(request["service_id"], asText(deployment?.["service_id"], ""));
+    const service = getService(serviceId) as Record<string, unknown> | undefined;
+    const requester = getOperator(asText(request["requested_by"], "")) as Record<string, unknown> | undefined;
+    const riskChecks = baselineDeploymentId
+      ? (getDeploymentRiskChecks(baselineDeploymentId) as Array<Record<string, unknown>>)
+      : [];
+    const { failed, warned, summary } = summarizeChecks(riskChecks);
+    const changeCounts = baselineDeploymentId
+      ? summarizeChangeCounts(baselineDeploymentId)
+      : { totalFiles: 0, additions: 0, deletions: 0 };
+
+    const recentRollback = (getAllDeployments({
+      serviceId,
+      environment: asText(request["environment"], ""),
+    }) as Array<Record<string, unknown>>).find(
+      (item) => asText(item["status"], "") === "rolled_back",
+    );
+
+    const recentSignals = [
+      summary,
+      changeCounts.totalFiles > 0
+        ? `파일 ${changeCounts.totalFiles}개 · +${changeCounts.additions} / -${changeCounts.deletions}`
+        : "변경 요약 없음",
+      recentRollback ? "최근 롤백 이력 있음" : "최근 롤백 이력 없음",
+    ].filter(Boolean);
+
+    return {
+      id: asText(request["id"], ""),
+      request_id: asText(request["id"], ""),
+      service_id: serviceId,
+      service_name: asText(service?.["name"], serviceId),
+      environment: asText(request["environment"], ""),
+      target_version: asText(request["target_version"], asText(deployment?.["version"], "")),
+      baseline_deployment_id: baselineDeploymentId,
+      baseline_version: asText(deployment?.["version"], ""),
+      requested_by: asText(request["requested_by"], ""),
+      requested_by_name: asText(requester?.["name"], asText(request["requested_by"], "")),
+      requested_at: asText(request["created_at"], ""),
+      status: asText(request["status"], "approval_requested"),
+      recentSignals,
+      signalSummary: recentSignals.join(" · "),
+      riskSummary: summary,
+      risk_fail_count: failed.length,
+      risk_warn_count: warned.length,
+      changeSummary: `파일 ${changeCounts.totalFiles}개`,
+      approvable: input.actorRole === "release_manager" || input.actorRole === "ops_engineer",
+    };
+  });
 }
 
 type InternalHandler = (input: Record<string, string>) => unknown;
@@ -113,6 +456,12 @@ export const INTERNAL_SOURCE_HANDLERS: Record<string, InternalHandler> = {
         : "롤백 계획이 아직 생성되지 않았습니다.",
     };
   },
+  "deployment.rollbackCandidates": ({ deploymentId }) =>
+    getRollbackCandidatesForDeployment(deploymentId) as Array<Record<string, unknown>>,
+  "deployment.quickLaunchBaseline": ({ deploymentId, actorId }) =>
+    (getQuickDeployBaseline({ deploymentId, actorId }) as Record<string, unknown> | null),
+  "deployment.approvalQueue": ({ actorId, actorRole }) =>
+    getDeploymentApprovalQueue({ actorId, actorRole }) as Array<Record<string, unknown>>,
   "incident.detail": ({ incidentId }) =>
     (getIncident(incidentId) as Record<string, unknown> | undefined) ?? null,
   "incident.evidence": ({ incidentId }) =>
@@ -520,6 +869,30 @@ export const DATA_SOURCE_DEFINITIONS: DataSourceDef[] = [
     timeoutMs: 1000,
     inputSchema: { type: "object", required: ["deploymentId"] },
     outputSchema: { type: "object" },
+  },
+  {
+    id: "deployment.rollbackCandidates",
+    kind: "internal_db",
+    handlerKey: "deployment.rollbackCandidates",
+    timeoutMs: 1500,
+    inputSchema: { type: "object", required: ["deploymentId"] },
+    outputSchema: { type: "array" },
+  },
+  {
+    id: "deployment.quickLaunchBaseline",
+    kind: "internal_db",
+    handlerKey: "deployment.quickLaunchBaseline",
+    timeoutMs: 1500,
+    inputSchema: { type: "object", required: ["deploymentId", "actorId"] },
+    outputSchema: { type: "object", nullable: true },
+  },
+  {
+    id: "deployment.approvalQueue",
+    kind: "internal_db",
+    handlerKey: "deployment.approvalQueue",
+    timeoutMs: 1500,
+    inputSchema: { type: "object", required: ["actorId", "actorRole"] },
+    outputSchema: { type: "array" },
   },
   {
     id: "incident.detail",

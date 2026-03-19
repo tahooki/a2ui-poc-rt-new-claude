@@ -11,6 +11,9 @@ export type TemplateDecisionInputSource = "user" | "context" | "derived";
 
 export type A2UITemplateToolName =
   | "renderRollbackCard"
+  | "renderRollbackActionCard"
+  | "renderDeploymentApprovalInboxCard"
+  | "renderQuickDeployLaunchpadCard"
   | "renderEvidenceCard"
   | "renderDryRunStepperCard"
   | "renderConfirmCard"
@@ -83,6 +86,106 @@ export const SEED_A2UI_TEMPLATES: SeedA2UITemplateDefinition[] = [
         required: false,
         source: "derived",
         priority: 30,
+      },
+    ],
+  },
+  {
+    id: "tpl_rollback_action",
+    name: "롤백 실행",
+    description: "롤백 가능한 배포 후보를 보여주고 즉시 열람/실행하는 A2UI 카드",
+    cardType: "rollback_action",
+    builderKey: "rollback_action",
+    toolName: "renderRollbackActionCard",
+    category: "deployments",
+    isEnabledByDefault: true,
+    promptHint:
+      "롤백 후보 목록, 바로 실행 가능한 배포, 상세 열람이 필요할 때 사용",
+    keywords: ["롤백 후보", "rollback candidate", "롤백 실행", "rollback 가능", "되돌릴 배포"],
+    allowedPages: ["dashboard", "deployments", "incidents"],
+    allowedRoles: ["oncall_engineer", "release_manager", "ops_engineer"],
+    decisionInputs: [
+      {
+        key: "selectedDeploymentId",
+        label: "선택된 배포 ID",
+        description: "현재 페이지 컨텍스트에서 선택된 배포 식별자",
+        required: false,
+        source: "context",
+        priority: 10,
+      },
+      {
+        key: "rollbackSignals",
+        label: "롤백 시그널",
+        description: "질문에서 감지한 롤백 후보/실행/목록 관련 신호",
+        required: false,
+        source: "derived",
+        priority: 20,
+      },
+    ],
+  },
+  {
+    id: "tpl_deployment_approval_inbox",
+    name: "배포 승인 Inbox",
+    description: "승인 대기 중인 배포 요청을 빠르게 검토하고 승인/보류하는 A2UI 카드",
+    cardType: "deployment_approval_inbox",
+    builderKey: "deployment_approval_inbox",
+    toolName: "renderDeploymentApprovalInboxCard",
+    category: "deployments",
+    isEnabledByDefault: true,
+    promptHint:
+      "승인 대기 중인 배포 요청 목록을 보여주고 바로 승인/보류할 때 사용",
+    keywords: ["승인 대기 배포", "배포 승인", "approval queue", "승인 inbox", "pending deployment", "배포 대기중인 리스트"],
+    allowedPages: ["dashboard", "deployments"],
+    allowedRoles: ["release_manager", "ops_engineer"],
+    decisionInputs: [
+      {
+        key: "approvalScope",
+        label: "승인 범위",
+        description: "특정 서비스만 볼지 전체 승인 대기를 볼지",
+        required: true,
+        source: "user",
+        defaultValue: "전체 승인 대기",
+        priority: 5,
+      },
+      {
+        key: "selectedDeploymentId",
+        label: "선택된 배포 ID",
+        description: "현재 페이지 컨텍스트에서 선택된 배포 식별자",
+        required: false,
+        source: "context",
+        priority: 20,
+      },
+    ],
+  },
+  {
+    id: "tpl_quick_deploy_launchpad",
+    name: "간단 배포 시작",
+    description: "기존 성공 배포를 기준으로 새 배포를 빠르게 시작하는 A2UI 카드",
+    cardType: "quick_deploy_launchpad",
+    builderKey: "quick_deploy_launchpad",
+    toolName: "renderQuickDeployLaunchpadCard",
+    category: "deployments",
+    isEnabledByDefault: true,
+    promptHint:
+      "이전 배포 기준으로 빠르게 새 배포를 시작하거나 승인 요청을 만들 때 사용",
+    keywords: ["간단 배포", "빠른 배포", "재배포", "다시 배포", "quick deploy"],
+    allowedPages: ["dashboard", "deployments"],
+    allowedRoles: ["release_manager", "ops_engineer"],
+    decisionInputs: [
+      {
+        key: "selectedDeploymentId",
+        label: "선택된 배포 ID",
+        description: "현재 페이지 컨텍스트에서 선택된 배포 식별자",
+        required: false,
+        source: "context",
+        priority: 10,
+      },
+      {
+        key: "deployIntentSignals",
+        label: "배포 실행 시그널",
+        description: "질문에서 감지한 재배포/빠른 배포/이전 배포 관련 신호",
+        required: false,
+        source: "derived",
+        priority: 20,
       },
     ],
   },
@@ -317,10 +420,19 @@ export const CORE_AI_TOOL_NAMES = [
   "analyzeIncident",
 ] as const;
 
+export const VISIBLE_A2UI_TEMPLATE_IDS = [
+  "tpl_dry_run_stepper",
+  "tpl_rollback_action",
+  "tpl_quick_deploy_launchpad",
+  "tpl_deployment_approval_inbox",
+] as const;
+
 function buildAllEnabledTemplateDefaults() {
   return SEED_A2UI_TEMPLATES.map((template) => ({
     templateId: template.id,
-    enabled: true,
+    enabled: VISIBLE_A2UI_TEMPLATE_IDS.includes(
+      template.id as (typeof VISIBLE_A2UI_TEMPLATE_IDS)[number],
+    ),
   }));
 }
 

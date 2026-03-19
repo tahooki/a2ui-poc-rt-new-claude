@@ -6,6 +6,7 @@ import {
   getA2UITemplateOverrides,
   getA2UITemplateRules,
 } from "@/server/db";
+import { VISIBLE_A2UI_TEMPLATE_IDS } from "@/server/ai/template-config";
 import { getDataSourceDefinition, listBindingsForTemplate } from "@/server/a2ui";
 import { listScenarios } from "@/server/scenarios";
 import { A2UI_SCENARIO_QUESTION_CASES } from "@/server/scenarios/a2ui-question-catalog";
@@ -27,7 +28,11 @@ function collectTemplateArgKeys(
 export async function GET() {
   try {
     const currentScenarioId = getCurrentScenarioId();
-    const templates = getAllA2UITemplates();
+    const templates = getAllA2UITemplates().filter((template) =>
+      VISIBLE_A2UI_TEMPLATE_IDS.includes(
+        String(template["id"] ?? "") as (typeof VISIBLE_A2UI_TEMPLATE_IDS)[number],
+      ),
+    );
     const rules = getA2UITemplateRules();
     const overrides = getA2UITemplateOverrides();
     const decisionInputs = getA2UITemplateDecisionInputs();

@@ -5,7 +5,10 @@ import {
   getA2UITemplateOverrides,
   getA2UITemplateRules,
 } from "@/server/db";
-import type { TemplateDecisionInputSource } from "@/server/ai/template-config";
+import {
+  VISIBLE_A2UI_TEMPLATE_IDS,
+  type TemplateDecisionInputSource,
+} from "@/server/ai/template-config";
 
 type ScopeType = "global" | "scenario" | "page" | "role";
 
@@ -268,6 +271,11 @@ export function listA2UITemplateAvailability(
   return getAllA2UITemplates()
     .map((row) => normalizeTemplate(row))
     .filter((row): row is A2UITemplateRecord => row !== null)
+    .filter((template) =>
+      VISIBLE_A2UI_TEMPLATE_IDS.includes(
+        template.id as (typeof VISIBLE_A2UI_TEMPLATE_IDS)[number],
+      ),
+    )
     .map((template) =>
       buildAvailability(
         template,

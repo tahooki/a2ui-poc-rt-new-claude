@@ -30,6 +30,35 @@ export const TOOL_PARAMETER_SPECS: Record<string, ToolParameterSpec> = {
       },
     ],
   },
+  renderRollbackActionCard: {
+    toolName: 'renderRollbackActionCard',
+    cardType: 'rollback_action',
+    params: [
+      {
+        name: 'deploymentId',
+        type: 'string',
+        description: '롤백 후보 카드를 렌더링할 기준 배포의 ID. latest, recent_deployment 같은 별칭도 허용',
+        defaultAlias: 'latest',
+      },
+    ],
+  },
+  renderDeploymentApprovalInboxCard: {
+    toolName: 'renderDeploymentApprovalInboxCard',
+    cardType: 'deployment_approval_inbox',
+    params: [],
+  },
+  renderQuickDeployLaunchpadCard: {
+    toolName: 'renderQuickDeployLaunchpadCard',
+    cardType: 'quick_deploy_launchpad',
+    params: [
+      {
+        name: 'deploymentId',
+        type: 'string',
+        description: '빠른 배포 카드를 렌더링할 기준 배포의 ID. latest, recent_deployment 같은 별칭도 허용',
+        defaultAlias: 'latest',
+      },
+    ],
+  },
   renderEvidenceCard: {
     toolName: 'renderEvidenceCard',
     cardType: 'evidence_comparison',
