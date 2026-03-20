@@ -6,7 +6,7 @@ Next.js 기반의 데모용 운영 콘솔입니다. 인시던트 대응, 배포 
 
 ```bash
 npm install
-# Optional: copy env only if you want live OpenAI responses
+# Optional: copy env only if you want live AI responses
 cp .env.example .env.local
 npm run dev
 ```
@@ -32,7 +32,38 @@ npm run scenario:verify -- --all
 BASE_URL=http://127.0.0.1:3001 npm run scenario:load -- --all
 ```
 
-`OPENAI_API_KEY`가 없으면 Copilot은 데모용 fallback 응답으로 동작합니다.
+`OPENAI_API_KEY` 또는 `AI_API_KEY`가 없으면 Copilot은 데모용 fallback 응답으로 동작합니다.
+
+## AI Provider Configuration
+
+기본값은 OpenAI (`gpt-4o-mini`) 이지만, 권장 방식은 OpenRouter 같은 OpenAI 호환 API를 연결해서 모델을 유연하게 바꾸는 것입니다.
+
+OpenRouter에서 Qwen 계열 모델을 쓸 때:
+
+```bash
+AI_API_KEY=your_openrouter_api_key_here
+AI_MODEL=qwen/qwen3-coder
+AI_BASE_URL=https://openrouter.ai/api/v1
+AI_PROVIDER_NAME=openrouter
+AI_HEADERS_JSON='{"HTTP-Referer":"http://localhost:3000","X-Title":"DevOps Ops Console"}'
+```
+
+OpenRouter에서는 모델 ID를 보통 `provider/model` 형식으로 사용하므로, 실제 지원 모델명은 OpenRouter 모델 목록에서 확인해 그대로 넣는 편이 안전합니다.
+
+OpenAI를 그대로 쓸 때:
+
+```bash
+OPENAI_API_KEY=your_openai_api_key_here
+```
+
+다른 OpenAI 호환 엔드포인트도 같은 방식으로 연결할 수 있습니다.
+
+```bash
+AI_API_KEY=your_provider_api_key_here
+AI_MODEL=your-model-id
+AI_BASE_URL=https://your-provider.example/v1
+AI_PROVIDER_NAME=your-provider-name
+```
 
 ## Verification
 

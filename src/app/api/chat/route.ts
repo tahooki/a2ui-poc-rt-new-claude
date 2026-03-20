@@ -6,9 +6,12 @@ import {
   stepCountIs,
   type UIMessage,
 } from 'ai';
-import { openai } from '@ai-sdk/openai';
 import { buildSystemPrompt, PageContext } from '@/server/ai/system-prompt';
 import { aiTools } from '@/server/ai/tools';
+import {
+  getAiLanguageModel,
+  hasUsableAiLanguageModel,
+} from '@/server/ai/model-provider';
 import {
   clearPendingTemplateDecisionState,
   getCurrentScenarioId,
@@ -499,7 +502,6 @@ export async function POST(req: Request) {
     }
 
     const userText = extractLastUserText(messages);
-    const apiKey = process.env.OPENAI_API_KEY?.trim();
     const currentScenarioId = getCurrentScenarioId();
     const enabledTemplates = listEnabledA2UITemplates(
       {
@@ -628,7 +630,6 @@ export async function POST(req: Request) {
         context,
         scenarioId: currentScenarioId,
         templates: decisionTemplates,
-        apiKey,
       });
 
       if (decision.shouldAskFollowUp && decision.followUpQuestion) {
@@ -667,7 +668,6 @@ export async function POST(req: Request) {
           userText: decisionUserText,
           context,
           scenarioId: currentScenarioId,
-          apiKey,
         });
 
         if (!renderPlan) {
@@ -751,12 +751,13 @@ export async function POST(req: Request) {
     const systemPrompt = `${buildSystemPrompt(context)}\n\n## A2UI 템플릿 가이드\n\n${templateGuidance}`;
     const modelMessages = await convertToModelMessages(messages);
 
-    if (!apiKey || apiKey.includes('your') || apiKey.includes('here')) {
+    const model = getAiLanguageModel();
+    if (!hasUsableAiLanguageModel() || model === null) {
       return createFallbackResponse(context, messages);
     }
 
     const result = streamText({
-      model: openai('gpt-4o-mini'),
+      model,
       system: systemPrompt,
       messages: modelMessages,
       tools: runtimeTools,

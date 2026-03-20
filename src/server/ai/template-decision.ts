@@ -1,6 +1,6 @@
 import { generateObject } from 'ai';
-import { openai } from '@ai-sdk/openai';
 import { z } from 'zod';
+import { getAiLanguageModel, hasUsableAiLanguageModel } from '@/server/ai/model-provider';
 import type { PageContext } from '@/server/ai/system-prompt';
 import type {
   A2UITemplateAvailability,
@@ -67,7 +67,6 @@ interface DecideTemplateWithAIParams {
   context: PageContext;
   scenarioId: string;
   templates: A2UITemplateAvailability[];
-  apiKey?: string;
 }
 
 interface BuildTemplateDecisionCandidatesParams {
@@ -82,7 +81,6 @@ interface BuildToolArgsWithAIParams {
   userText: string;
   context: PageContext;
   scenarioId: string;
-  apiKey?: string;
 }
 
 // ─── Input Collection Helpers ───────────────────────────────────────────────
@@ -443,13 +441,8 @@ export async function selectTemplateWithAI(
     };
   }
 
-  const hasValidApiKey =
-    typeof params.apiKey === 'string' &&
-    params.apiKey.trim().length > 0 &&
-    !params.apiKey.includes('your') &&
-    !params.apiKey.includes('here');
-
-  if (!hasValidApiKey) {
+  const model = getAiLanguageModel();
+  if (!hasUsableAiLanguageModel() || model === null) {
     return chooseByHeuristic(candidates, params.userText);
   }
 
@@ -473,7 +466,7 @@ export async function selectTemplateWithAI(
     }));
 
     const { object } = await generateObject({
-      model: openai('gpt-4o-mini'),
+      model,
       schema: selectTemplateSchema,
       system:
         '당신은 A2UI 템플릿 라우팅 판별기입니다. 반드시 후보 목록 내부의 templateId만 선택하고, 선택 근거를 간결하게 작성하세요.',
@@ -517,19 +510,14 @@ export async function buildToolArgsWithAI(
     return buildToolArgsByHeuristic(selectedTemplate, context, userText);
   }
 
-  const hasValidApiKey =
-    typeof params.apiKey === 'string' &&
-    params.apiKey.trim().length > 0 &&
-    !params.apiKey.includes('your') &&
-    !params.apiKey.includes('here');
-
-  if (!hasValidApiKey) {
+  const model = getAiLanguageModel();
+  if (!hasUsableAiLanguageModel() || model === null) {
     return buildToolArgsByHeuristic(selectedTemplate, context, userText);
   }
 
   try {
     const { object } = await generateObject({
-      model: openai('gpt-4o-mini'),
+      model,
       schema: buildToolArgsSchema,
       system:
         '당신은 A2UI 카드 렌더링 데이터 생성기입니다. 선택된 템플릿의 tool을 실행하기 위한 정확한 인자를 생성하세요.',
