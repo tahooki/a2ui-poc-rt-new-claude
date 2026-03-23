@@ -2035,7 +2035,10 @@ export function buildDeploymentApprovalInboxCard(cardData: Record<string, unknow
   const candidates = normalizeDeploymentCandidates(cardData).slice(0, 5);
   const queueState = String(cardData['state'] ?? cardData['status'] ?? 'approval_pending');
   const totalCount = candidates.length;
-  const actionableCount = candidates.filter((candidate) => String(candidate['status'] ?? candidate['state'] ?? 'approval_pending') === 'approval_pending').length;
+  const actionableCount = candidates.filter((candidate) => {
+    const s = String(candidate['status'] ?? candidate['state'] ?? 'approval_pending');
+    return ['approval_pending', 'approval_requested', 'draft'].includes(s);
+  }).length;
   const summary = totalCount > 0
     ? `지금 처리할 수 있는 배포 요청 ${actionableCount}건`
     : '현재 승인 대기 배포가 없습니다.';
@@ -2092,7 +2095,7 @@ export function buildDeploymentApprovalInboxCard(cardData: Record<string, unknow
     const canApprove = pickBool(candidate, ['canApprove'], true);
     const isApproved = ['approved', 'held', 'expired'].includes(status);
     const isRisky = risk.failCount > 0;
-    const isActionable = !isApproved && status === 'approval_pending';
+    const isActionable = !isApproved && ['approval_pending', 'approval_requested', 'draft'].includes(status);
     const detailPrimary = isRisky || !canApprove || !isActionable;
     const statusText = renderQueueState(status);
     const stateNote = isApproved
