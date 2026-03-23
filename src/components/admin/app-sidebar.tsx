@@ -4,11 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   LayoutDashboard,
-  AlertTriangle,
   Rocket,
-  Briefcase,
-  FileText,
-  ClipboardList,
   Terminal,
   Layers3,
 } from "lucide-react";
@@ -34,29 +30,9 @@ const NAV_ITEMS = [
     icon: LayoutDashboard,
   },
   {
-    label: "Incidents",
-    href: "/incidents",
-    icon: AlertTriangle,
-  },
-  {
     label: "Deployments",
     href: "/deployments",
     icon: Rocket,
-  },
-  {
-    label: "Jobs",
-    href: "/jobs",
-    icon: Briefcase,
-  },
-  {
-    label: "Reports",
-    href: "/reports",
-    icon: FileText,
-  },
-  {
-    label: "Audit Log",
-    href: "/audit",
-    icon: ClipboardList,
   },
   {
     label: "A2UI Templates",

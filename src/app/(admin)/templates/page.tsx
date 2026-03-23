@@ -3,7 +3,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Layers3,
-  RefreshCw,
   Play,
   CheckCircle2,
   ChevronDown,
@@ -1047,6 +1046,12 @@ function applyPreviewCardAction(
   }
 }
 
+const HIDDEN_TEMPLATE_IDS = new Set(["tpl_dry_run_stepper"]);
+
+function isVisibleTemplate(template: { id: string }) {
+  return !HIDDEN_TEMPLATE_IDS.has(template.id);
+}
+
 // ─── Main Component ─────────────────────────────────────────────────────────
 
 export default function TemplatesPage() {
@@ -1120,12 +1125,13 @@ export default function TemplatesPage() {
       setIsLoading(true);
       const res = await fetch("/api/a2ui-templates");
       const payload = (await res.json()) as TemplatesResponse;
+      const visibleTemplates = payload.templates.filter(isVisibleTemplate);
       setData(payload);
       setSelectedId((prev) => {
-        if (keepSelection && prev && payload.templates.some((item) => item.id === prev)) {
+        if (keepSelection && prev && visibleTemplates.some((item) => item.id === prev)) {
           return prev;
         }
-        return payload.templates[0]?.id ?? "";
+        return visibleTemplates[0]?.id ?? "";
       });
     } finally {
       setIsLoading(false);
@@ -1136,8 +1142,13 @@ export default function TemplatesPage() {
     loadData(false);
   }, []);
 
+  const visibleTemplates = useMemo(
+    () => (data?.templates ?? []).filter(isVisibleTemplate),
+    [data?.templates],
+  );
+
   const filteredTemplates = useMemo(() => {
-    const templates = data?.templates ?? [];
+    const templates = visibleTemplates;
     const query = search.trim().toLowerCase();
     if (!query) return templates;
     return templates.filter((template) => {
@@ -1149,14 +1160,14 @@ export default function TemplatesPage() {
         keywords.some((keyword) => keyword.toLowerCase().includes(query))
       );
     });
-  }, [data?.templates, search]);
+  }, [search, visibleTemplates]);
 
   const selectedTemplate = useMemo(
     () =>
       filteredTemplates.find((template) => template.id === selectedId) ??
-      data?.templates.find((template) => template.id === selectedId) ??
+      visibleTemplates.find((template) => template.id === selectedId) ??
       null,
-    [data?.templates, filteredTemplates, selectedId],
+    [filteredTemplates, selectedId, visibleTemplates],
   );
 
   const currentScenario = useMemo(
@@ -1366,20 +1377,6 @@ export default function TemplatesPage() {
     },
     [],
   );
-
-  async function updateScenario(scenarioId: string) {
-    setIsSaving(true);
-    try {
-      await fetch("/api/runtime/scenario", {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ scenarioId }),
-      });
-      await loadData();
-    } finally {
-      setIsSaving(false);
-    }
-  }
 
   async function runPreview() {
     if (!selectedTemplate) return;
@@ -1706,199 +1703,6 @@ export default function TemplatesPage() {
 
   return (
     <div className="flex flex-1 flex-col gap-6 p-6">
-      <div className="rounded-2xl border border-border/60 bg-gradient-to-br from-[#F7F2E7] via-white to-[#E8F3EC] p-5">
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div className="max-w-2xl space-y-2">
-            <div className="inline-flex items-center gap-2 rounded-full border border-emerald-200 bg-white/80 px-3 py-1 text-[11px] font-mono uppercase tracking-wider text-emerald-700">
-              <WandSparkles className="h-3.5 w-3.5" />
-              Guided Builder
-            </div>
-            <h1 className="text-2xl font-semibold tracking-tight text-slate-900">
-              챗봇에 보여줄 A2UI를 단계별로 설정하세요
-            </h1>
-            <p className="max-w-xl text-sm leading-6 text-slate-600">
-              starter를 선택하고, 연결된 데이터를 확인하고, 질문을 시뮬레이션한 뒤, preview와 publish까지 한 흐름으로 진행합니다.
-            </p>
-            <div className="mt-3 rounded-xl border border-emerald-200/70 bg-white/75 p-3">
-              <p className="text-[11px] font-mono uppercase tracking-wider text-emerald-700">
-                처음이라면 이렇게 시작하세요
-              </p>
-              <ol className="mt-2 space-y-1 text-sm leading-6 text-slate-700">
-                <li>1. 위 starter 카드에서 가장 가까운 업무 유형을 고릅니다.</li>
-                <li>2. 데이터 연결에서 “어떤 데이터를 어디서 가져올지”만 채웁니다.</li>
-                <li>3. Preview와 질문 시뮬레이터로 결과를 확인한 뒤 publish 합니다.</li>
-              </ol>
-            </div>
-          </div>
-          <div className="grid gap-2 sm:grid-cols-2">
-            {[
-              { label: "1. Starter 선택", value: "template 고르기" },
-              { label: "2. 데이터 연결", value: "binding/source 저장" },
-              { label: "3. Preview 확인", value: "질문 시뮬레이션 + render" },
-              { label: "4. Publish", value: "챗봇 사용 가능" },
-            ].map((step) => (
-              <div
-                key={step.label}
-                className="rounded-xl border border-white/80 bg-white/80 p-3 shadow-sm"
-              >
-                <p className="text-[11px] font-mono uppercase tracking-wider text-slate-500">
-                  {step.label}
-                </p>
-                <p className="mt-1 text-sm font-medium text-slate-900">{step.value}</p>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      <div className="grid gap-4 xl:grid-cols-[0.95fr_1.05fr]">
-        <Card>
-          <CardHeader className="border-b border-border/50">
-            <CardTitle className="text-sm font-mono uppercase tracking-wider">
-              빠른 가이드
-            </CardTitle>
-            <CardDescription>
-              처음 보는 사람도 여기서 바로 흐름과 용어를 빠르게 익힐 수 있습니다.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="pt-4">
-            <Tabs defaultValue="steps" className="gap-4">
-              <TabsList
-                variant="line"
-                className="h-auto w-full flex-wrap justify-start rounded-xl border border-border/60 bg-muted/20 p-1"
-              >
-                <TabsTrigger value="steps" className="rounded-lg px-3 py-2 text-sm">
-                  시작 순서
-                </TabsTrigger>
-                <TabsTrigger value="terms" className="rounded-lg px-3 py-2 text-sm">
-                  용어 설명
-                </TabsTrigger>
-              </TabsList>
-
-              <TabsContent value="steps" className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-                {[
-                  {
-                    title: "어떤 화면을 띄울지",
-                    body: "starter나 template를 먼저 고릅니다.",
-                  },
-                  {
-                    title: "어디서 데이터를 가져올지",
-                    body: "내부 데이터인지, API인지 선택합니다.",
-                  },
-                  {
-                    title: "어떤 값을 넣을지",
-                    body: "질문과 문맥 값을 입력 이름에 연결합니다.",
-                  },
-                  {
-                    title: "정상인지 확인",
-                    body: "preview와 sandbox로 실제 결과를 봅니다.",
-                  },
-                ].map((item) => (
-                  <div key={item.title} className="rounded-xl border border-border/60 bg-card p-4">
-                    <p className="text-sm font-semibold text-foreground">{item.title}</p>
-                    <p className="mt-2 text-xs leading-5 text-muted-foreground">{item.body}</p>
-                  </div>
-                ))}
-              </TabsContent>
-
-              <TabsContent value="terms" className="grid gap-3 md:grid-cols-2">
-                {[
-                  { term: "Output Key", desc: FRIENDLY_TERM_HELP.outputKey },
-                  { term: "Handler Key", desc: FRIENDLY_TERM_HELP.handlerKey },
-                  { term: "Result Path", desc: FRIENDLY_TERM_HELP.resultPath },
-                  { term: "Input Mapping", desc: FRIENDLY_TERM_HELP.inputMapping },
-                ].map((item) => (
-                  <div key={item.term} className="rounded-xl border border-border/60 bg-card p-4">
-                    <p className="text-sm font-semibold text-foreground">{item.term}</p>
-                    <p className="mt-2 text-xs leading-5 text-muted-foreground">{item.desc}</p>
-                  </div>
-                ))}
-              </TabsContent>
-            </Tabs>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="border-b border-border/50">
-            <CardTitle className="text-sm font-mono uppercase tracking-wider">
-              현재 작업 맥락
-            </CardTitle>
-            <CardDescription>
-              지금 어떤 시나리오를 기준으로 작업 중인지 한눈에 확인합니다.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4 pt-4">
-            <div className="flex flex-wrap items-center gap-2">
-              <Select
-                value={data?.currentScenarioId ?? ""}
-                onValueChange={(value) => {
-                  if (value) {
-                    updateScenario(value);
-                  }
-                }}
-              >
-                <SelectTrigger className="min-w-[240px] bg-card">
-                  <SelectValue placeholder="현재 시나리오 선택" />
-                </SelectTrigger>
-                <SelectContent>
-                  {(data?.scenarios ?? []).map((scenario) => (
-                    <SelectItem key={scenario.id} value={scenario.id}>
-                      {scenario.title}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-
-              <Button
-                variant="outline"
-                className="font-mono"
-                onClick={() => loadData()}
-                disabled={isLoading || isSaving}
-              >
-                <RefreshCw className={cn("h-4 w-4", (isLoading || isSaving) && "animate-spin")} />
-                Refresh
-              </Button>
-            </div>
-
-            <div className="rounded-xl border border-border/60 bg-muted/20 p-4">
-              <p className="text-sm font-semibold text-foreground">
-                {currentScenario?.title ?? "시나리오를 선택하세요"}
-              </p>
-              <p className="mt-1 text-sm text-muted-foreground">
-                {currentScenario?.description ?? "현재 시나리오 기준으로 템플릿 우선순위와 활성 상태를 확인합니다."}
-              </p>
-            </div>
-
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div className="rounded-xl border border-border/60 bg-card p-4">
-                <p className="text-xs font-medium text-muted-foreground">전체 템플릿</p>
-                <p className="mt-1 font-mono text-2xl text-foreground">
-                  {data?.counts.total ?? "—"}
-                </p>
-              </div>
-              <div className="rounded-xl border border-border/60 bg-card p-4">
-                <p className="text-xs font-medium text-muted-foreground">전역 활성화</p>
-                <p className="mt-1 font-mono text-2xl text-emerald-500">
-                  {data?.counts.enabled ?? "—"}
-                </p>
-              </div>
-              <div className="rounded-xl border border-border/60 bg-card p-4">
-                <p className="text-xs font-medium text-muted-foreground">시나리오 활성화</p>
-                <p className="mt-1 font-mono text-2xl text-violet-500">
-                  {data?.counts.effectiveForScenario ?? "—"}
-                </p>
-              </div>
-              <div className="rounded-xl border border-border/60 bg-card p-4">
-                <p className="text-xs font-medium text-muted-foreground">선택된 템플릿</p>
-                <p className="mt-1 text-sm font-semibold text-foreground">
-                  {selectedTemplate?.name ?? "아직 선택되지 않음"}
-                </p>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-
       <div className="grid gap-4 xl:grid-cols-[1.1fr_0.9fr]">
         <Card>
           <CardHeader className="border-b border-border/50">
@@ -1911,7 +1715,7 @@ export default function TemplatesPage() {
             </CardDescription>
           </CardHeader>
           <CardContent className="grid gap-3 pt-4 md:grid-cols-2 xl:grid-cols-3">
-            {(data?.templates ?? []).slice(0, 6).map((template) => (
+            {visibleTemplates.slice(0, 6).map((template) => (
               <button
                 key={template.id}
                 type="button"
