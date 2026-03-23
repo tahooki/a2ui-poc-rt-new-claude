@@ -25,7 +25,12 @@ const A2UICardRenderer = dynamic(
 
 interface ChatMessageProps {
   message: UIMessage;
-  onA2UIAction?: (actionName: string, context: Record<string, unknown>) => void;
+  onA2UIAction?: (
+    actionName: string,
+    context: Record<string, unknown>,
+    sourceMessageId: string,
+    sourceToolCallId: string,
+  ) => void;
 }
 
 function formatTime(date: Date): string {
@@ -155,7 +160,22 @@ function isA2UIRenderResult(
   );
 }
 
-function ToolPartCard({ part, onA2UIAction }: { part: AnyPart; onA2UIAction?: (actionName: string, context: Record<string, unknown>) => void }) {
+function ToolPartCard({
+  part,
+  onA2UIAction,
+  sourceMessageId,
+  sourceToolCallId,
+}: {
+  part: AnyPart;
+  onA2UIAction?: (
+    actionName: string,
+    context: Record<string, unknown>,
+    sourceMessageId: string,
+    sourceToolCallId: string,
+  ) => void;
+  sourceMessageId: string;
+  sourceToolCallId: string;
+}) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [isDecisionExpanded, setIsDecisionExpanded] = useState(false);
 
@@ -223,7 +243,9 @@ function ToolPartCard({ part, onA2UIAction }: { part: AnyPart; onA2UIAction?: (a
         <A2UICardRenderer
           cardType={result.cardType}
           cardData={result.cardData}
-          onAction={onA2UIAction}
+          onAction={(actionName, context) => {
+            onA2UIAction?.(actionName, context, sourceMessageId, sourceToolCallId);
+          }}
         />
       </div>
     );
@@ -321,7 +343,17 @@ export function ChatMessage({ message, onA2UIAction }: ChatMessageProps) {
 
             // Tool parts (static or dynamic)
             if (p.type === "dynamic-tool" || p.type.startsWith("tool-")) {
-              return <ToolPartCard key={idx} part={p} onA2UIAction={onA2UIAction} />;
+              return (
+                <ToolPartCard
+                  key={idx}
+                  part={p}
+                  onA2UIAction={onA2UIAction}
+                  sourceMessageId={message.id}
+                  sourceToolCallId={
+                    p.type === "dynamic-tool" ? p.toolCallId : `${message.id}:${idx}`
+                  }
+                />
+              );
             }
 
             return null;

@@ -12,7 +12,7 @@ const ROLLBACK_TRANSITIONS: Record<RollbackPlanStatus, RollbackPlanStatus[]> = {
 };
 
 // Roles allowed to manage rollbacks
-const RELEASE_ROLES = ['release_manager', 'ops_engineer'] as const;
+const RELEASE_ROLES = ['release_manager', 'ops_engineer', 'oncall_engineer'] as const;
 
 export async function POST(
   req: NextRequest,

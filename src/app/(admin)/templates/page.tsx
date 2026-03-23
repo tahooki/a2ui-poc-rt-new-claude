@@ -1078,6 +1078,7 @@ export default function TemplatesPage() {
   const [expandedBindingId, setExpandedBindingId] = useState<string | null>(null);
   const [expandedDecisionInputIndex, setExpandedDecisionInputIndex] = useState<number | null>(0);
   const previewSectionRef = useRef<HTMLDivElement | null>(null);
+  const pendingActionMessageRef = useRef<string | null>(null);
   const pendingTemplateSelectionSyncRef = useRef<{
     templateId: string;
     sampleCaseId: string;
@@ -1235,14 +1236,33 @@ export default function TemplatesPage() {
     });
   }, [previewResult]);
 
-  const handlePreviewCardAction = useCallback(async (actionName: string, context: Record<string, unknown>) => {
-    if (actionName === "open_rollback_candidates" && currentOperator) {
-      try {
-        const stringContext: Record<string, string> = {};
-        for (const [key, val] of Object.entries(context)) {
-          stringContext[key] = String(val ?? "");
-        }
+  // Actions that should be routed to the server API for reliable card re-rendering
+  const SERVER_ROUTED_ACTIONS = new Set([
+    "build_deploy_artifact",
+    "start_deploy_run",
+    "refresh_deploy_status",
+    "open_rollback_candidates",
+    "quick_deploy_create_draft",
+    "create_deploy_draft",
+    "quick_deploy_request_approval",
+    "request_deploy_approval",
+    "quick_deploy_start_now",
+    "start_quick_deploy",
+    "approve_deploy_request",
+    "approve_deployment_request",
+    "hold_deploy_request",
+    "hold_deployment_request",
+  ]);
 
+  const handlePreviewCardAction = useCallback(async (actionName: string, context: Record<string, unknown>) => {
+    // Route server-handled actions through the API (like chat-panel does)
+    if (SERVER_ROUTED_ACTIONS.has(actionName) && currentOperator) {
+      const stringContext: Record<string, string> = {};
+      for (const [key, val] of Object.entries(context)) {
+        stringContext[key] = String(val ?? "");
+      }
+
+      try {
         const res = await fetch("/api/a2ui-action", {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -1264,21 +1284,66 @@ export default function TemplatesPage() {
             cardType: payload.data.cardType,
             cardData: payload.data.cardData,
           });
-          setPreviewActionMessage(payload.message ?? "롤백 실행 카드를 열었습니다.");
+          setPreviewActionMessage(payload.message ?? null);
           return;
         }
+
+        if (payload.success) {
+          // Server succeeded but didn't return a re-rendered card — apply local state update as fallback
+          setPreviewInteractiveState((current) => {
+            if (!current) return current;
+            const result = applyPreviewCardAction(current, actionName, context);
+            pendingActionMessageRef.current = payload.message ?? result.message;
+            return result.next;
+          });
+          if (pendingActionMessageRef.current) {
+            setPreviewActionMessage(pendingActionMessageRef.current);
+            pendingActionMessageRef.current = null;
+          } else {
+            setPreviewActionMessage(payload.message ?? "작업이 완료되었습니다.");
+          }
+          return;
+        }
+
+        setPreviewActionMessage(payload.error ?? "작업 처리 중 오류가 발생했습니다.");
       } catch (error) {
-        console.error("[TemplatesPage] Failed to load rollback candidates:", error);
+        console.error("[TemplatesPage] Server action failed:", actionName, error);
+        // On server error, still try local state update for UI feedback
+        setPreviewInteractiveState((current) => {
+          if (!current) return current;
+          const result = applyPreviewCardAction(current, actionName, context);
+          pendingActionMessageRef.current = result.message;
+          return result.next;
+        });
+        setPreviewActionMessage(pendingActionMessageRef.current ?? "서버 통신 오류가 발생했습니다.");
+        pendingActionMessageRef.current = null;
       }
+      return;
     }
 
+    // Client-side state updates for non-server actions
     setPreviewInteractiveState((current) => {
-      if (!current) return current;
-      const result = applyPreviewCardAction(current, actionName, context);
-      setPreviewActionMessage(result.message);
+      // If no interactive state yet, initialize from simulation result or preview result
+      const base = current ?? (() => {
+        const src = simulationResult?.preview ?? previewResult?.preview;
+        if (src && typeof src === "object" && "cardType" in src && "cardData" in src) {
+          return {
+            cardType: String(src.cardType ?? ""),
+            cardData: JSON.parse(JSON.stringify(src.cardData ?? {})) as Record<string, unknown>,
+          };
+        }
+        return null;
+      })();
+      if (!base) return current;
+      const result = applyPreviewCardAction(base, actionName, context);
+      pendingActionMessageRef.current = result.message;
       return result.next;
     });
-  }, [currentOperator]);
+    if (pendingActionMessageRef.current) {
+      setPreviewActionMessage(pendingActionMessageRef.current);
+      pendingActionMessageRef.current = null;
+    }
+  }, [currentOperator, simulationResult, previewResult]);
 
   const hasChanges = useMemo(() => {
     if (!editState || !selectedTemplate) return false;
@@ -1997,8 +2062,15 @@ export default function TemplatesPage() {
                     )}
                     {simulationResult.preview && !("error" in simulationResult.preview) && (
                       <A2UICardRenderer
-                        cardType={String(simulationResult.preview.cardType ?? "")}
-                        cardData={(simulationResult.preview.cardData as Record<string, unknown>) ?? {}}
+                        cardType={
+                          previewInteractiveState?.cardType ??
+                          String(simulationResult.preview.cardType ?? "")
+                        }
+                        cardData={
+                          previewInteractiveState?.cardData ??
+                          ((simulationResult.preview.cardData as Record<string, unknown>) ?? {})
+                        }
+                        onAction={handlePreviewCardAction}
                       />
                     )}
                     {simulationResult.preview && "error" in simulationResult.preview && (
@@ -2042,8 +2114,15 @@ export default function TemplatesPage() {
                           {entry.preview && !("error" in entry.preview) && (
                             <div className="mt-3">
                               <A2UICardRenderer
-                                cardType={String(entry.preview.cardType ?? "")}
-                                cardData={(entry.preview.cardData as Record<string, unknown>) ?? {}}
+                                cardType={
+                                  previewInteractiveState?.cardType ??
+                                  String(entry.preview.cardType ?? "")
+                                }
+                                cardData={
+                                  previewInteractiveState?.cardData ??
+                                  ((entry.preview.cardData as Record<string, unknown>) ?? {})
+                                }
+                                onAction={handlePreviewCardAction}
                               />
                             </div>
                           )}

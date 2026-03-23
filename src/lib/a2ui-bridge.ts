@@ -319,132 +319,71 @@ export function buildRollbackActionCard(cardData: Record<string, unknown>): A2UI
     ['environment', 'env'],
     candidates[0] ? pickText(candidates[0], ['environment', 'env'], '전체 환경') : '전체 환경',
   );
-  const scopeCount = candidates.length;
-  const availabilityCount = candidates.filter((candidate) => candidateActionable(candidate)).length;
-  const primaryCandidate =
-    candidates.find((candidate) => candidate['primary_candidate'] === true) ?? candidates[0] ?? null;
-  const summaryText =
-    scopeCount > 0
-      ? `${serviceName} · ${envScope} · 지금 롤백 대상 ${availabilityCount} / 전체 이력 ${scopeCount}`
-      : '롤백 가능한 배포 후보가 없습니다.';
 
+  // ── Header ──
   const headerComponents: A2UIComponent[] = [
-    mkText('rollback_title', '롤백 실행', 'h2'),
-    mkText('rollback_eyebrow', 'A2UI · 롤백 액션 카드', 'caption'),
-    mkText('rollback_headline', '현재 문제 배포와 직전 안정 버전을 함께 보여줍니다.', 'h4'),
-    mkText('rollback_summary', summaryText, 'caption'),
-    ...(primaryCandidate
-      ? [
-          mkText(
-            'rollback_primary_hint',
-            `${pickText(primaryCandidate, ['version', 'current_version'], '현재 배포')} 항목이 기본 롤백 대상입니다.`,
-            'caption',
-          ),
-        ]
-      : []),
+    mkText('rollback_title', '배포 이력', 'h2'),
+    mkText('rollback_summary', `${serviceName} · ${envScope} · 최근 ${candidates.length}건`, 'caption'),
     mkDivider('rollback_div_top'),
   ];
 
+  // ── Candidate rows ──
   const candidateComponents: A2UIComponent[] = [];
-  const primaryCandidateIds: string[] = [];
-  const secondaryCandidateIds: string[] = [];
+  const cardIds: string[] = [];
 
   if (candidates.length === 0) {
     candidateComponents.push(
       mkIcon('rollback_empty_icon', 'info'),
-      mkText('rollback_empty_title', '롤백 가능한 배포 후보가 없습니다.', 'h4'),
-      mkText(
-        'rollback_empty_detail',
-        '이 서비스에서 되돌릴 수 있는 최근 배포가 아직 없습니다. 배포 페이지에서 더 많은 문맥을 확인하세요.',
-        'caption',
-      ),
-      mkCol('rollback_empty_col', [
-        'rollback_empty_icon',
-        'rollback_empty_title',
-        'rollback_empty_detail',
-      ]),
+      mkText('rollback_empty_title', '배포 이력이 없습니다.', 'h4'),
+      mkCol('rollback_empty_col', ['rollback_empty_icon', 'rollback_empty_title']),
     );
-    primaryCandidateIds.push('rollback_empty_col');
+    cardIds.push('rollback_empty_col');
   } else {
     candidates.forEach((candidate, index) => {
       const candidateId = String(candidate['id'] ?? candidate['deployment_id'] ?? `candidate-${index}`);
       const currentVersion = pickText(candidate, ['version', 'current_version', 'currentVersion']);
-      const previousVersion = pickText(candidate, ['previous_version', 'previousVersion', 'target_version']);
       const environment = pickText(candidate, ['environment', 'env'], envScope);
       const status = pickText(candidate, ['state', 'candidate_state', 'rollback_state', 'status'], 'candidate');
       const deployedAt = pickText(candidate, ['deployed_at', 'created_at', 'updated_at', 'started_at'], '');
-      const signals = normalizeSignalList(candidate);
-      const actionable = candidateActionable(candidate);
       const statusIconName = statusIcon(status);
-      const candidateRole = pickText(candidate, ['candidate_role'], 'history');
-      const roleLabel = rollbackCandidateRoleLabel(candidateRole);
 
-      const signalText =
-        signals.length > 0
-          ? `최근 신호: ${signals.join(' · ')}`
-          : '최근 신호: -';
-      const timeText = deployedAt ? `배포 시각: ${deployedAt}` : '배포 시각: -';
-      const versionText = `현재 ${currentVersion} → 이전 ${previousVersion || 'N/A'}`;
-      const stateNote =
-        candidateRole === 'current_target'
-          ? '현재 실패한 배포입니다. 이 행의 롤백 버튼을 누르면 지금 이 배포를 되돌립니다.'
-          : candidateRole === 'recovery_target'
-            ? '현재 배포가 롤백되면 이 버전으로 복구됩니다.'
-            : previousVersion
-              ? '참고용 이전 배포 이력입니다.'
-              : '이전 버전이 없어 롤백 불가';
+      const isRolledBack = status === 'rolled_back' || status === 'rollbacked';
+      const isFirst = index === 0;
 
-      const rowChildren: string[] = [];
+      // Status text: 롤백됨 > 배포됨/실패/진행중
+      const statusText = isRolledBack
+        ? '롤백됨'
+        : status === 'succeeded'
+          ? '배포됨'
+          : status === 'running'
+            ? '진행 중'
+            : status === 'failed'
+              ? '실패'
+              : candidateStatusLabel(candidate);
+
+      // Show rollback button: not for already rolled-back, and not for the first (current) item
+      const showRollbackBtn = !isRolledBack && !isFirst;
+
+      const timeLabel = deployedAt
+        ? deployedAt.replace(/T/, ' ').replace(/\.\d+Z$/, '').replace(/Z$/, '')
+        : '';
+
       const rowComponents: A2UIComponent[] = [
-        mkText(`rollback_${index}_service`, buildCandidateLabel(candidate), 'h4'),
-        mkIcon(`rollback_${index}_status_icon`, statusIconName),
-        mkText(`rollback_${index}_status`, candidateStatusLabel(candidate), 'caption'),
-        mkRow(`rollback_${index}_header`, [
-          `rollback_${index}_service`,
-          `rollback_${index}_status_icon`,
-          `rollback_${index}_status`,
-        ], 'spaceBetween'),
-        mkText(`rollback_${index}_role`, roleLabel, 'caption'),
-        mkText(`rollback_${index}_version`, versionText, 'body'),
-        mkText(`rollback_${index}_env`, `환경: ${environment}`, 'caption'),
-        mkText(`rollback_${index}_time`, timeText, 'caption'),
-        mkText(`rollback_${index}_signals`, signalText, 'caption'),
-        mkText(`rollback_${index}_note`, stateNote, 'caption'),
+        mkText(`rb_${index}_ver`, `${currentVersion}`, 'h4'),
+        mkIcon(`rb_${index}_icon`, statusIconName),
+        mkText(`rb_${index}_st`, statusText, 'caption'),
+        mkRow(`rb_${index}_hdr`, [`rb_${index}_ver`, `rb_${index}_icon`, `rb_${index}_st`], 'spaceBetween'),
+        mkText(`rb_${index}_env`, `${environment}${timeLabel ? ` · ${timeLabel}` : ''}`, 'caption'),
       ];
 
-      rowChildren.push(
-        `rollback_${index}_header`,
-        `rollback_${index}_role`,
-        `rollback_${index}_version`,
-        `rollback_${index}_env`,
-        `rollback_${index}_time`,
-        `rollback_${index}_signals`,
-        `rollback_${index}_note`,
-        `rollback_${index}_actions_div`,
-        `rollback_${index}_actions`,
-      );
+      const colChildren = [`rb_${index}_hdr`, `rb_${index}_env`];
 
-      rowComponents.push(
-        mkDivider(`rollback_${index}_actions_div`),
-        mkText(`rollback_${index}_detail_text`, '상세 보기'),
-        mkButton(
-          `rollback_${index}_detail_btn`,
-          `rollback_${index}_detail_text`,
-          'view_rollback_candidate',
-          {
-            candidateId,
-            deploymentId: candidateId,
-            serviceId: pickText(candidate, ['service_id', 'service', 'service_name'], serviceName),
-            environment,
-          },
-        ),
-      );
-      if (actionable) {
+      if (showRollbackBtn) {
         rowComponents.push(
-          mkText(`rollback_${index}_rollback_text`, '이 배포 롤백'),
+          mkText(`rb_${index}_rb_text`, '롤백하기'),
           mkButton(
-            `rollback_${index}_rollback_btn`,
-            `rollback_${index}_rollback_text`,
+            `rb_${index}_rb_btn`,
+            `rb_${index}_rb_text`,
             'execute_rollback',
             {
               candidateId,
@@ -455,58 +394,30 @@ export function buildRollbackActionCard(cardData: Record<string, unknown>): A2UI
             },
             true,
           ),
+          mkRow(`rb_${index}_actions`, [`rb_${index}_rb_btn`], 'end'),
         );
-      } else {
-        rowComponents.push(mkText(`rollback_${index}_info_text`, roleLabel, 'caption'));
+        colChildren.push(`rb_${index}_actions`);
       }
 
       rowComponents.push(
-        mkRow(`rollback_${index}_actions`, actionable
-          ? [`rollback_${index}_detail_btn`, `rollback_${index}_rollback_btn`]
-          : [`rollback_${index}_detail_btn`, `rollback_${index}_info_text`],
-        'end'),
-        mkDivider(`rollback_${index}_divider`),
-        mkCol(`rollback_${index}_col`, rowChildren),
-        mkCard(`rollback_${index}_card`, `rollback_${index}_col`),
+        mkCol(`rb_${index}_col`, colChildren),
+        mkCard(`rb_${index}_card`, `rb_${index}_col`),
       );
 
       candidateComponents.push(...rowComponents);
-      if (candidateRole === 'current_target') {
-        primaryCandidateIds.push(`rollback_${index}_card`);
-      } else {
-        secondaryCandidateIds.push(`rollback_${index}_card`);
-      }
+      cardIds.push(`rb_${index}_card`);
     });
-  }
-
-  const listComponents: A2UIComponent[] = [];
-  if (primaryCandidateIds.length > 0) {
-    listComponents.push(mkList('rollback_primary_list', primaryCandidateIds, 'vertical'));
-  }
-  if (secondaryCandidateIds.length > 0) {
-    listComponents.push(
-      mkDivider('rollback_related_div'),
-      mkText('rollback_related_title', '복구될 버전 및 이전 이력', 'h3'),
-      mkText('rollback_related_detail', '아래 항목은 롤백되었을 때 돌아가거나 참고할 버전입니다.', 'caption'),
-      mkList('rollback_related_list', secondaryCandidateIds, 'vertical'),
-    );
   }
 
   const components: A2UIComponent[] = [
     ...headerComponents,
     ...candidateComponents,
-    ...listComponents,
+    ...(cardIds.length > 0 ? [mkList('rollback_list', cardIds, 'vertical')] : []),
     mkCol('rollback_main_col', [
       'rollback_title',
-      'rollback_eyebrow',
-      'rollback_headline',
       'rollback_summary',
-      ...(primaryCandidate ? ['rollback_primary_hint'] : []),
       'rollback_div_top',
-      ...(primaryCandidateIds.length > 0 ? ['rollback_primary_list'] : ['rollback_empty_col']),
-      ...(secondaryCandidateIds.length > 0
-        ? ['rollback_related_div', 'rollback_related_title', 'rollback_related_detail', 'rollback_related_list']
-        : []),
+      ...(cardIds.length > 0 ? ['rollback_list'] : ['rollback_empty_col']),
     ]),
     mkCard('root_card', 'rollback_main_col'),
   ];
@@ -519,10 +430,7 @@ export function buildRollbackActionCard(cardData: Record<string, unknown>): A2UI
       environment: envScope,
       candidates: candidates.map((candidate) => ({
         id: candidate['id'] ?? candidate['deployment_id'] ?? '',
-        service_id: pickText(candidate, ['service_id', 'service', 'service_name'], serviceName),
         version: pickText(candidate, ['version', 'current_version', 'currentVersion']),
-        previous_version: pickText(candidate, ['previous_version', 'previousVersion', 'target_version']),
-        environment: pickText(candidate, ['environment', 'env'], envScope),
         status: candidateStatusLabel(candidate),
       })),
     },
@@ -2386,6 +2294,463 @@ function quickDeployLastEventText(runEvents: Array<Record<string, unknown>>) {
   return detail ? `${stage} · ${detail}` : stage;
 }
 
+type QuickDeployStepStatus = 'locked' | 'current' | 'complete';
+
+interface QuickDeployUiHints {
+  focusStep?: 1 | 2 | 3;
+  flashCompletedStep?: 1 | 2 | 3;
+  collapseCompletedSteps?: boolean;
+  animateProgress?: boolean;
+}
+
+interface QuickDeployLocalActionState {
+  pendingAction?: string;
+  pendingStep?: 1 | 2 | 3;
+  label?: string;
+}
+
+interface QuickDeployActionFeedback {
+  status?: 'idle' | 'pending' | 'success' | 'error';
+  message?: string;
+}
+
+interface QuickDeployUiState {
+  overallState: string;
+  progressPercent: number;
+  currentStage: string;
+  activeStep: 1 | 2 | 3;
+  step1: {
+    status: QuickDeployStepStatus;
+    showAction: boolean;
+    showCompletedBadge: boolean;
+  };
+  step2: {
+    status: QuickDeployStepStatus;
+    showAction: boolean;
+    showCompletedBadge: boolean;
+  };
+  step3: {
+    status: QuickDeployStepStatus;
+    showAction: boolean;
+    showCompletedBadge: boolean;
+    expanded: boolean;
+    showRollbackHandoff: boolean;
+  };
+}
+
+function asQuickDeployUiHints(value: unknown): QuickDeployUiHints | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+
+  const source = value as Record<string, unknown>;
+  const focusStep = Number(source['focusStep']);
+  const flashCompletedStep = Number(source['flashCompletedStep']);
+
+  return {
+    focusStep: focusStep === 1 || focusStep === 2 || focusStep === 3 ? focusStep : undefined,
+    flashCompletedStep:
+      flashCompletedStep === 1 || flashCompletedStep === 2 || flashCompletedStep === 3
+        ? flashCompletedStep
+        : undefined,
+    collapseCompletedSteps: source['collapseCompletedSteps'] !== false,
+    animateProgress: source['animateProgress'] !== false,
+  };
+}
+
+function quickDeployStageLabel(stage: string): string {
+  switch (stage) {
+    case 'artifact_ready':
+      return '이미지 준비';
+    case 'building':
+      return '이미지 생성';
+    case 'canary_10':
+      return '카나리 10%';
+    case 'canary_50':
+      return '카나리 50%';
+    case 'verifying':
+      return '검증';
+    case 'completed':
+      return '완료';
+    case 'pending':
+      return '대기';
+    default:
+      return statusLabel(stage);
+  }
+}
+
+function quickDeployStageDetail(stage: string): string {
+  switch (stage) {
+    case 'artifact_ready':
+      return '배포 가능한 이미지가 준비되었습니다.';
+    case 'building':
+      return '이미지를 생성 중입니다.';
+    case 'canary_10':
+      return '첫 롤아웃 구간';
+    case 'canary_50':
+      return '중간 확장 구간';
+    case 'verifying':
+      return '안정성 검증 구간';
+    case 'completed':
+      return '최종 완료';
+    case 'pending':
+      return '아직 시작하지 않음';
+    default:
+      return statusLabel(stage);
+  }
+}
+
+function deriveQuickDeployUiState(input: {
+  artifactStatus: string;
+  runStatus: string;
+  progressPercent: number;
+  currentStage: string;
+  uiHints?: QuickDeployUiHints | null;
+  localActionState?: QuickDeployLocalActionState | null;
+}): QuickDeployUiState {
+  const terminalRun = ['succeeded', 'failed', 'rolled_back'].includes(input.runStatus);
+  const hasRun = Boolean(input.runStatus && input.runStatus !== 'pending');
+  const computedActiveStep: 1 | 2 | 3 = hasRun
+    ? 3
+    : input.artifactStatus === 'ready'
+      ? 2
+      : 1;
+  const hintedStep =
+    input.localActionState?.pendingStep ??
+    input.uiHints?.focusStep ??
+    computedActiveStep;
+  const activeStep = Math.max(computedActiveStep, hintedStep) as 1 | 2 | 3;
+  const step1Status: QuickDeployStepStatus =
+    activeStep > 1 || input.artifactStatus === 'ready' ? 'complete' : 'current';
+  const step2Status: QuickDeployStepStatus =
+    activeStep > 2 || hasRun
+      ? 'complete'
+      : activeStep === 2
+        ? 'current'
+        : 'locked';
+  const step3Status: QuickDeployStepStatus =
+    activeStep < 3
+      ? 'locked'
+      : terminalRun
+        ? 'complete'
+        : 'current';
+
+  return {
+    overallState:
+      input.runStatus && input.runStatus !== 'pending'
+        ? input.runStatus
+        : input.artifactStatus || 'pending',
+    progressPercent: Math.max(0, Math.min(100, Math.round(input.progressPercent || 0))),
+    currentStage: input.currentStage || 'pending',
+    activeStep,
+    step1: {
+      status: step1Status,
+      showAction: step1Status === 'current',
+      showCompletedBadge: step1Status === 'complete',
+    },
+    step2: {
+      status: step2Status,
+      showAction: step2Status === 'current',
+      showCompletedBadge: step2Status === 'complete',
+    },
+    step3: {
+      status: step3Status,
+      showAction: true,
+      showCompletedBadge: step3Status === 'complete',
+      expanded: activeStep === 3,
+      showRollbackHandoff: terminalRun,
+    },
+  };
+}
+
+function asQuickDeployLocalActionState(
+  value: unknown,
+): QuickDeployLocalActionState | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+
+  const source = value as Record<string, unknown>;
+  const pendingStep = Number(source['pendingStep']);
+
+  return {
+    pendingAction:
+      typeof source['pendingAction'] === 'string' ? String(source['pendingAction']) : undefined,
+    pendingStep:
+      pendingStep === 1 || pendingStep === 2 || pendingStep === 3 ? pendingStep : undefined,
+    label: typeof source['label'] === 'string' ? String(source['label']) : undefined,
+  };
+}
+
+function asQuickDeployActionFeedback(
+  value: unknown,
+): QuickDeployActionFeedback | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+
+  const source = value as Record<string, unknown>;
+  const status = String(source['status'] ?? '');
+
+  return {
+    status:
+      status === 'idle' || status === 'pending' || status === 'success' || status === 'error'
+        ? status
+        : undefined,
+    message: typeof source['message'] === 'string' ? String(source['message']) : undefined,
+  };
+}
+
+function buildQuickDeployProgressComponents(input: {
+  progressPercent: number;
+  currentStage: string;
+  runStatus: string;
+}) {
+  const milestones = [
+    { threshold: 10, percent: '10%', stage: 'canary_10', label: '준비' },
+    { threshold: 40, percent: '40%', stage: 'canary_50', label: '확장' },
+    { threshold: 70, percent: '70%', stage: 'verifying', label: '검증' },
+    { threshold: 85, percent: '85%', stage: 'stabilizing', label: '안정화' },
+    { threshold: 100, percent: '100%', stage: 'completed', label: '완료' },
+  ];
+
+  const normalizedPercent = Math.max(0, Math.min(100, Math.round(input.progressPercent)));
+  const normalizedStage = input.currentStage || 'pending';
+  const currentIndex = (() => {
+    switch (normalizedStage) {
+      case 'canary_10':
+        return 0;
+      case 'canary_50':
+        return 1;
+      case 'verifying':
+        return 2;
+      case 'stabilizing':
+        return 3;
+      case 'completed':
+        return 4;
+      default:
+        for (let index = milestones.length - 1; index >= 0; index -= 1) {
+          if (normalizedPercent >= milestones[index].threshold) {
+            return index;
+          }
+        }
+        return 0;
+    }
+  })();
+
+  const totalSegments = 12;
+  const filledSegments = Math.max(0, Math.min(totalSegments, Math.round((normalizedPercent / 100) * totalSegments)));
+  const barSegmentIds: string[] = [];
+  const laneIds: string[] = [];
+  const components: A2UIComponent[] = [
+    mkText('launch_progress_title', '진행 바', 'caption'),
+    mkText(
+      'launch_progress_summary',
+      `현재 단계: ${quickDeployStageLabel(normalizedStage)} · ${normalizedPercent}%`,
+      'h4',
+    ),
+    mkText(
+      'launch_progress_detail',
+      `상태: ${quickDeployStateLabel(input.runStatus)} · ${quickDeployStageDetail(normalizedStage)}`,
+      'caption',
+    ),
+    mkText('launch_progress_track_label', '진행 막대', 'caption'),
+  ];
+
+  for (let index = 0; index < totalSegments; index += 1) {
+    const isFilled = index < filledSegments;
+    const isHead = isFilled && index === filledSegments - 1;
+    const symbol = isFilled ? (isHead ? '▣' : '█') : '░';
+    const segmentId = `launch_progress_segment_${index}`;
+    components.push(mkText(segmentId, symbol, 'caption'));
+    barSegmentIds.push(segmentId);
+  }
+
+  components.push(mkRow('launch_progress_bar_track', barSegmentIds, 'start'));
+
+  milestones.forEach((milestone, index) => {
+    const reached = normalizedPercent >= milestone.threshold;
+    const isCurrent = index === currentIndex;
+    const iconName = isCurrent
+      ? statusIcon('running')
+      : reached
+        ? statusIcon('succeeded')
+        : statusIcon('pending');
+    const rowId = `launch_progress_lane_${index}`;
+    const infoId = `launch_progress_lane_${index}_info`;
+
+    components.push(
+      mkIcon(`launch_progress_lane_${index}_icon`, iconName),
+      mkText(`launch_progress_lane_${index}_percent`, milestone.percent, 'caption'),
+      mkText(
+        `launch_progress_lane_${index}_stage`,
+        `${milestone.label} · ${quickDeployStageLabel(milestone.stage)}`,
+        'caption',
+      ),
+      mkText(
+        `launch_progress_lane_${index}_state`,
+        isCurrent ? '현재' : reached ? '완료' : '대기',
+        'caption',
+      ),
+      mkCol(infoId, [
+        `launch_progress_lane_${index}_percent`,
+        `launch_progress_lane_${index}_stage`,
+        `launch_progress_lane_${index}_state`,
+      ]),
+      mkRow(rowId, [`launch_progress_lane_${index}_icon`, infoId], 'spaceBetween'),
+    );
+    laneIds.push(rowId);
+  });
+
+  components.push(
+    mkDivider('launch_progress_div'),
+    mkText('launch_progress_legend', '채워진 칸은 현재까지 완료된 구간입니다.', 'caption'),
+    mkRow('launch_progress_lanes', laneIds, 'spaceBetween'),
+  );
+
+  return components;
+}
+
+function buildQuickDeployInlineRollbackPreview(
+  rollbackPreview: Record<string, unknown>,
+  serviceName: string,
+): { components: A2UIComponent[]; childId: string } | null {
+  const candidates = normalizeRollbackCandidates(rollbackPreview).slice(0, 2);
+  const childId = 'launch_rollback_inline_col';
+  const components: A2UIComponent[] = [
+    mkText('launch_rollback_inline_title', '롤백 후보', 'h3'),
+    mkText(
+      'launch_rollback_inline_detail',
+      '배포 실패 직후 바로 이어서 확인할 수 있도록 같은 카드 안에 펼쳐 둡니다.',
+      'caption',
+    ),
+  ];
+
+  if (candidates.length === 0) {
+    components.push(
+      mkText('launch_rollback_inline_empty', '롤백 가능한 후보가 없습니다.', 'caption'),
+      mkCol(childId, [
+        'launch_rollback_inline_title',
+        'launch_rollback_inline_detail',
+        'launch_rollback_inline_empty',
+      ]),
+    );
+    components.push(mkCard('launch_rollback_inline_card', childId));
+    return { components, childId: 'launch_rollback_inline_card' };
+  }
+
+  const candidateCardIds: string[] = [];
+
+  candidates.forEach((candidate, index) => {
+    const candidateId = String(candidate['id'] ?? candidate['deployment_id'] ?? `candidate-${index}`);
+    const currentVersion = pickText(candidate, ['version', 'current_version', 'currentVersion']);
+    const previousVersion = pickText(candidate, ['previous_version', 'previousVersion', 'target_version']);
+    const environment = pickText(candidate, ['environment', 'env'], 'production');
+    const status = pickText(candidate, ['state', 'candidate_state', 'rollback_state', 'status'], 'candidate');
+    const deployedAt = pickText(candidate, ['deployed_at', 'created_at', 'updated_at', 'started_at'], '');
+    const signals = normalizeSignalList(candidate);
+    const actionable = candidateActionable(candidate);
+    const candidateRole = pickText(candidate, ['candidate_role'], 'history');
+    const roleLabel = rollbackCandidateRoleLabel(candidateRole);
+    const rowId = `launch_rollback_inline_row_${index}`;
+    const actionRowId = `launch_rollback_inline_actions_${index}`;
+
+    components.push(
+      mkText(`launch_rollback_inline_${index}_title`, buildCandidateLabel(candidate), 'h4'),
+      mkIcon(`launch_rollback_inline_${index}_icon`, statusIcon(status)),
+      mkText(`launch_rollback_inline_${index}_status`, candidateStatusLabel(candidate), 'caption'),
+      mkRow(`launch_rollback_inline_${index}_header`, [
+        `launch_rollback_inline_${index}_title`,
+        `launch_rollback_inline_${index}_icon`,
+        `launch_rollback_inline_${index}_status`,
+      ], 'spaceBetween'),
+      mkText(`launch_rollback_inline_${index}_role`, roleLabel, 'caption'),
+      mkText(`launch_rollback_inline_${index}_version`, `현재 ${currentVersion} → 이전 ${previousVersion || 'N/A'}`, 'body'),
+      mkText(`launch_rollback_inline_${index}_env`, `환경: ${environment}`, 'caption'),
+      mkText(`launch_rollback_inline_${index}_time`, deployedAt ? `배포 시각: ${deployedAt}` : '배포 시각: -', 'caption'),
+      mkText(
+        `launch_rollback_inline_${index}_signals`,
+        signals.length > 0 ? `최근 신호: ${signals.join(' · ')}` : '최근 신호: -',
+        'caption',
+      ),
+      mkText(
+        `launch_rollback_inline_${index}_note`,
+        candidateRole === 'current_target'
+          ? '실패한 배포입니다. 이 카드 안에서 바로 롤백을 이어갈 수 있습니다.'
+          : candidateRole === 'recovery_target'
+            ? '복구될 버전입니다.'
+            : previousVersion
+              ? '참고용 이전 배포 이력입니다.'
+              : '이전 버전이 없어 롤백 불가',
+        'caption',
+      ),
+      mkDivider(`launch_rollback_inline_${index}_divider`),
+      mkText(`launch_rollback_inline_${index}_detail_text`, '상세 보기'),
+      mkButton(
+        `launch_rollback_inline_${index}_detail_btn`,
+        `launch_rollback_inline_${index}_detail_text`,
+        'view_rollback_candidate',
+        {
+          candidateId,
+          deploymentId: candidateId,
+          serviceId: pickText(candidate, ['service_id', 'service', 'service_name'], serviceName),
+          environment,
+        },
+      ),
+    );
+
+    const actionChildren = [`launch_rollback_inline_${index}_detail_btn`];
+    if (actionable) {
+      components.push(
+        mkText(`launch_rollback_inline_${index}_rollback_text`, '이 배포 롤백'),
+        mkButton(
+          `launch_rollback_inline_${index}_rollback_btn`,
+          `launch_rollback_inline_${index}_rollback_text`,
+          'execute_rollback',
+          {
+            candidateId,
+            deploymentId: candidateId,
+            planId: asText(candidate['plan_id'] ?? candidate['rollback_plan_id'] ?? ''),
+            serviceId: pickText(candidate, ['service_id', 'service', 'service_name'], serviceName),
+            environment,
+          },
+          true,
+        ),
+      );
+      actionChildren.push(`launch_rollback_inline_${index}_rollback_btn`);
+    }
+
+    components.push(
+      mkRow(actionRowId, actionChildren, 'end'),
+      mkCol(rowId, [
+        `launch_rollback_inline_${index}_header`,
+        `launch_rollback_inline_${index}_role`,
+        `launch_rollback_inline_${index}_version`,
+        `launch_rollback_inline_${index}_env`,
+        `launch_rollback_inline_${index}_time`,
+        `launch_rollback_inline_${index}_signals`,
+        `launch_rollback_inline_${index}_note`,
+        `launch_rollback_inline_${index}_divider`,
+        actionRowId,
+      ]),
+      mkCard(`launch_rollback_inline_${index}_card`, rowId),
+    );
+    candidateCardIds.push(`launch_rollback_inline_${index}_card`);
+  });
+
+  components.push(
+    mkList('launch_rollback_inline_list', candidateCardIds, 'vertical'),
+    mkCol(childId, [
+      'launch_rollback_inline_title',
+      'launch_rollback_inline_detail',
+      'launch_rollback_inline_list',
+    ]),
+    mkCard('launch_rollback_inline_card', childId),
+  );
+
+  return { components, childId: 'launch_rollback_inline_card' };
+}
+
 export function buildQuickDeployLaunchpadCard(cardData: Record<string, unknown>): A2UICardDef {
   const baseline =
     asRecord(cardData['baseline']) ??
@@ -2489,14 +2854,40 @@ export function buildQuickDeployLaunchpadCard(cardData: Record<string, unknown>)
           ? '이미지가 준비되었습니다.'
           : '배포 파이프라인을 진행 중입니다.',
   );
-  const progressText = renderQuickDeployProgressBar(progressPercent);
-  const progressSummary = `${quickDeployStateLabel(state)} · ${lastMessage}`;
+  const uiHints = asQuickDeployUiHints(cardData['uiHints']);
+  const localActionState = asQuickDeployLocalActionState(cardData['localActionState']);
+  const actionFeedback = asQuickDeployActionFeedback(cardData['actionFeedback']);
+  const rollbackPreview = asRecord(cardData['rollbackPreview']);
+  const uiState = deriveQuickDeployUiState({
+    artifactStatus,
+    runStatus,
+    progressPercent,
+    currentStage,
+    uiHints,
+    localActionState,
+  });
+  const progressComponents = buildQuickDeployProgressComponents({
+    progressPercent: uiState.progressPercent,
+    currentStage: uiState.currentStage,
+    runStatus,
+  });
+  const inlineRollback = rollbackPreview
+    ? buildQuickDeployInlineRollbackPreview(rollbackPreview, serviceName)
+    : null;
   const rollbackReady = ['failed', 'rolled_back'].includes(state);
   const stateForIcon = String(state);
+  const flashCompletedStep = uiHints?.flashCompletedStep;
+  const step3BadgeText = uiState.step3.showCompletedBadge
+    ? statusLabel(uiState.overallState)
+    : '진행 중';
   const step1ActionText = artifactStatus === 'ready' ? '이미지 재생성' : '이미지 생성';
-  const step2ActionText = runStatus === 'deploying' || runStatus === 'verifying'
-    ? '배포 진행 중'
-    : '배포 시작';
+  const step2ActionText = '배포 시작';
+  const isStep1Pending = localActionState?.pendingAction === 'build_deploy_artifact';
+  const isStep2Pending = localActionState?.pendingAction === 'start_deploy_run';
+  const step1FeedbackMessage =
+    actionFeedback?.message ?? (isStep1Pending ? localActionState?.label : undefined);
+  const step2FeedbackMessage =
+    actionFeedback?.message ?? (isStep2Pending ? localActionState?.label : undefined);
 
   const headerComponents: A2UIComponent[] = [
     mkIcon('launch_icon', 'rocket_launch'),
@@ -2509,7 +2900,7 @@ export function buildQuickDeployLaunchpadCard(cardData: Record<string, unknown>)
     ),
     mkText(
       'launch_status',
-      `${quickDeployStateLabel(state)} · ${progressPercent}% · ${quickDeployLastEventText(runEvents)}`,
+      `${quickDeployStateLabel(uiState.overallState)} · ${uiState.progressPercent}% · ${quickDeployLastEventText(runEvents)}`,
       'caption',
     ),
     mkDivider('launch_div_top'),
@@ -2542,42 +2933,92 @@ export function buildQuickDeployLaunchpadCard(cardData: Record<string, unknown>)
     }),
   ];
 
-  const step1Components: A2UIComponent[] = [
-    mkText('launch_step_1_label', 'Step 1', 'caption'),
-    mkText('launch_step_1_title', '이미지 생성', 'h3'),
-    mkText(
-      'launch_step_1_detail',
-      '기준 배포를 바탕으로 배포 가능한 이미지를 만든 뒤 다음 단계에서 바로 사용합니다.',
-      'caption',
-    ),
-    ...step1Rows.flatMap((row) => row.components),
-    mkText('launch_step_1_uri_label', '이미지 URI', 'caption'),
-    mkText('launch_step_1_uri', imageUri, 'body'),
-    mkText('launch_step_1_action_text', step1ActionText),
-    mkButton(
-      'launch_step_1_action_btn',
-      'launch_step_1_action_text',
-      'build_deploy_artifact',
-      {
-        baselineDeploymentId: sourceDeploymentId,
-        deploymentId: sourceDeploymentId,
-        serviceId,
-        environment,
-        sourceVersion,
-      },
-      artifactStatus === 'ready',
-    ),
-    mkCol('launch_step_1_col', [
-      'launch_step_1_label',
-      'launch_step_1_title',
-      'launch_step_1_detail',
-      ...step1Rows.map((row) => row.rowId),
-      'launch_step_1_uri_label',
-      'launch_step_1_uri',
-      'launch_step_1_action_btn',
-    ]),
-    mkCard('launch_step_1_card', 'launch_step_1_col'),
-  ];
+  const step1Components: A2UIComponent[] =
+    uiState.step1.status === 'current'
+      ? [
+          mkText('launch_step_1_label', 'Step 1', 'caption'),
+          mkText('launch_step_1_title', '이미지 생성', 'h3'),
+          mkText(
+            'launch_step_1_detail',
+            '기준 배포를 바탕으로 배포 가능한 이미지를 만든 뒤 다음 단계에서 바로 사용합니다.',
+            'caption',
+          ),
+          ...step1Rows.flatMap((row) => row.components),
+          mkText('launch_step_1_uri_label', '이미지 URI', 'caption'),
+          mkText('launch_step_1_uri', imageUri, 'body'),
+          ...(isStep1Pending
+            ? [
+                mkIcon('launch_step_1_pending_icon', statusIcon('running')),
+                mkText(
+                  'launch_step_1_pending_text',
+                  localActionState?.label ?? '이미지 생성 중...',
+                  'caption',
+                ),
+                mkRow('launch_step_1_pending_row', [
+                  'launch_step_1_pending_icon',
+                  'launch_step_1_pending_text',
+                ], 'start'),
+              ]
+            : [
+                mkText('launch_step_1_action_text', step1ActionText),
+                mkButton(
+                  'launch_step_1_action_btn',
+                  'launch_step_1_action_text',
+                  'build_deploy_artifact',
+                  {
+                    baselineDeploymentId: sourceDeploymentId,
+                    deploymentId: sourceDeploymentId,
+                    serviceId,
+                    environment,
+                    sourceVersion,
+                  },
+                  true,
+                ),
+              ]),
+          ...(step1FeedbackMessage
+            ? [mkText('launch_step_1_feedback', step1FeedbackMessage, 'caption')]
+            : []),
+          mkCol('launch_step_1_col', [
+            'launch_step_1_label',
+            'launch_step_1_title',
+            'launch_step_1_detail',
+            ...step1Rows.map((row) => row.rowId),
+            'launch_step_1_uri_label',
+            'launch_step_1_uri',
+            ...(isStep1Pending ? ['launch_step_1_pending_row'] : ['launch_step_1_action_btn']),
+            ...(step1FeedbackMessage ? ['launch_step_1_feedback'] : []),
+          ]),
+          mkCard('launch_step_1_card', 'launch_step_1_col'),
+        ]
+      : [
+          mkText('launch_step_1_label', 'Step 1', 'caption'),
+          mkText('launch_step_1_title', '이미지 생성 완료', 'h3'),
+          mkText(
+            'launch_step_1_done',
+            flashCompletedStep === 1
+              ? '방금 완료됨'
+              : '배포 가능한 이미지가 준비되어 Step 2로 넘어갈 수 있습니다.',
+            'caption',
+          ),
+          mkIcon('launch_step_1_done_icon', 'check_circle'),
+          mkText('launch_step_1_done_status', '완료', 'caption'),
+          mkText('launch_step_1_uri_label', '이미지 URI', 'caption'),
+          mkText('launch_step_1_uri', imageUri, 'body'),
+          mkText('launch_step_1_img_label', '이미지 태그', 'caption'),
+          mkText('launch_step_1_img', imageTag, 'body'),
+          mkCol('launch_step_1_col', [
+            'launch_step_1_label',
+            'launch_step_1_title',
+            'launch_step_1_done',
+            'launch_step_1_done_icon',
+            'launch_step_1_done_status',
+            'launch_step_1_uri_label',
+            'launch_step_1_uri',
+            'launch_step_1_img_label',
+            'launch_step_1_img',
+          ]),
+          mkCard('launch_step_1_card', 'launch_step_1_col'),
+        ];
 
   const step2Rows = [
     mkInfoRow('launch_step_2_artifact', 'smart_toy', '사용할 이미지', {
@@ -2598,39 +3039,115 @@ export function buildQuickDeployLaunchpadCard(cardData: Record<string, unknown>)
     }),
   ];
 
-  const step2Components: A2UIComponent[] = [
-    mkText('launch_step_2_label', 'Step 2', 'caption'),
-    mkText('launch_step_2_title', '배포 실행', 'h3'),
-    mkText(
-      'launch_step_2_detail',
-      '이미지가 준비되면 즉시 배포를 시작합니다. 승인 단계는 이 카드에서 제외됩니다.',
-      'caption',
-    ),
-    ...step2Rows.flatMap((row) => row.components),
-    mkText('launch_step_2_action_text', step2ActionText),
-    mkButton(
-      'launch_step_2_action_btn',
-      'launch_step_2_action_text',
-      'start_deploy_run',
-      {
-        artifactId,
-        baselineDeploymentId: sourceDeploymentId,
-        deploymentId: sourceDeploymentId,
-        serviceId,
-        environment,
-        strategy,
-      },
-      runStatus === 'deploying' || runStatus === 'verifying',
-    ),
-    mkCol('launch_step_2_col', [
-      'launch_step_2_label',
-      'launch_step_2_title',
-      'launch_step_2_detail',
-      ...step2Rows.map((row) => row.rowId),
-      'launch_step_2_action_btn',
-    ]),
-    mkCard('launch_step_2_card', 'launch_step_2_col'),
-  ];
+  const step2Components: A2UIComponent[] =
+    uiState.step2.status === 'locked'
+      ? [
+          mkText('launch_step_2_label', 'Step 2', 'caption'),
+          mkText('launch_step_2_title', '배포 실행 잠금', 'h3'),
+          mkIcon('launch_step_2_locked_icon', 'lock'),
+          mkText(
+            'launch_step_2_locked_status',
+            '대기',
+            'caption',
+          ),
+          mkText(
+            'launch_step_2_locked_detail',
+            'Step 1에서 배포 이미지를 먼저 만들어야 이 단계가 열립니다.',
+            'caption',
+          ),
+          mkText('launch_step_2_locked_summary', imageTag, 'body'),
+          mkCol('launch_step_2_col', [
+            'launch_step_2_label',
+            'launch_step_2_title',
+            'launch_step_2_locked_icon',
+            'launch_step_2_locked_status',
+            'launch_step_2_locked_detail',
+            'launch_step_2_locked_summary',
+          ]),
+          mkCard('launch_step_2_card', 'launch_step_2_col'),
+        ]
+      : uiState.step2.status === 'current'
+      ? [
+          mkText('launch_step_2_label', 'Step 2', 'caption'),
+          mkText('launch_step_2_title', '배포 실행', 'h3'),
+          mkText(
+            'launch_step_2_detail',
+            '이미지가 준비되면 즉시 배포를 시작합니다. 승인 단계는 이 카드에서 제외됩니다.',
+            'caption',
+          ),
+          ...step2Rows.flatMap((row) => row.components),
+          ...(isStep2Pending
+            ? [
+                mkIcon('launch_step_2_pending_icon', statusIcon('running')),
+                mkText(
+                  'launch_step_2_pending_text',
+                  localActionState?.label ?? '배포 시작 중...',
+                  'caption',
+                ),
+                mkRow('launch_step_2_pending_row', [
+                  'launch_step_2_pending_icon',
+                  'launch_step_2_pending_text',
+                ], 'start'),
+              ]
+            : [
+                mkText('launch_step_2_action_text', step2ActionText),
+                mkButton(
+                  'launch_step_2_action_btn',
+                  'launch_step_2_action_text',
+                  'start_deploy_run',
+                  {
+                    artifactId,
+                    baselineDeploymentId: sourceDeploymentId,
+                    deploymentId: sourceDeploymentId,
+                    serviceId,
+                    environment,
+                    strategy,
+                  },
+                  true,
+                ),
+              ]),
+          ...(step2FeedbackMessage
+            ? [mkText('launch_step_2_feedback', step2FeedbackMessage, 'caption')]
+            : []),
+          mkCol('launch_step_2_col', [
+            'launch_step_2_label',
+            'launch_step_2_title',
+            'launch_step_2_detail',
+            ...step2Rows.map((row) => row.rowId),
+            ...(isStep2Pending ? ['launch_step_2_pending_row'] : ['launch_step_2_action_btn']),
+            ...(step2FeedbackMessage ? ['launch_step_2_feedback'] : []),
+          ]),
+          mkCard('launch_step_2_card', 'launch_step_2_col'),
+        ]
+      : [
+          mkText('launch_step_2_label', 'Step 2', 'caption'),
+          mkText('launch_step_2_title', '배포 실행 완료', 'h3'),
+          mkText(
+            'launch_step_2_done',
+            flashCompletedStep === 2
+              ? '방금 배포가 시작됨'
+              : '배포가 시작되어 Step 3에서 진행률과 이벤트를 확인합니다.',
+            'caption',
+          ),
+          mkIcon('launch_step_2_done_icon', 'check_circle'),
+          mkText('launch_step_2_done_status', '완료', 'caption'),
+          mkText('launch_step_2_image_label', '사용한 이미지', 'caption'),
+          mkText('launch_step_2_image', imageTag, 'body'),
+          mkText('launch_step_2_strategy_label', '배포 전략', 'caption'),
+          mkText('launch_step_2_strategy', strategy, 'body'),
+          mkCol('launch_step_2_col', [
+            'launch_step_2_label',
+            'launch_step_2_title',
+            'launch_step_2_done',
+            'launch_step_2_done_icon',
+            'launch_step_2_done_status',
+            'launch_step_2_image_label',
+            'launch_step_2_image',
+            'launch_step_2_strategy_label',
+            'launch_step_2_strategy',
+          ]),
+          mkCard('launch_step_2_card', 'launch_step_2_col'),
+        ];
 
   const eventRows: A2UIComponent[] = [];
   const eventRowIds: string[] = [];
@@ -2658,100 +3175,143 @@ export function buildQuickDeployLaunchpadCard(cardData: Record<string, unknown>)
     });
   }
 
-  const step3ActionIds: string[] = [];
-  step3ActionIds.push('launch_step_3_detail_btn', 'launch_step_3_refresh_btn');
-  if (rollbackReady) {
-    step3ActionIds.push('launch_step_3_rollback_btn');
-  }
+  const step3Components: A2UIComponent[] = uiState.step3.expanded
+    ? (() => {
+        const step3ActionIds: string[] = ['launch_step_3_detail_btn', 'launch_step_3_refresh_btn'];
+        const step3CardChildren: string[] = [
+          'launch_step_3_label',
+          'launch_step_3_title',
+          'launch_step_3_detail',
+          'launch_step_3_done_icon',
+          'launch_step_3_done_status',
+          'launch_progress_title',
+          'launch_progress_summary',
+          'launch_progress_detail',
+          'launch_progress_div',
+          'launch_progress_lanes',
+          'launch_step_3_state_row',
+          'launch_step_3_stage_row',
+          'launch_step_3_last_row',
+          'launch_step_3_div_events',
+          'launch_step_3_events_title',
+          ...eventRowIds,
+          'launch_step_3_actions',
+        ];
 
-  const step3Components: A2UIComponent[] = [
-    mkText('launch_step_3_label', 'Step 3', 'caption'),
-    mkText('launch_step_3_title', '결과 확인', 'h3'),
-    mkText(
-      'launch_step_3_detail',
-      rollbackReady
-        ? '배포가 실패했습니다. 롤백 후보를 바로 확인할 수 있습니다.'
-        : '실행 진행률과 최근 이벤트를 보고 다음 상태 전이를 확인합니다.',
-      'caption',
-    ),
-    mkText('launch_step_3_progress_label', '진행률', 'caption'),
-    mkText('launch_step_3_progress_bar', progressText, 'body'),
-    mkText('launch_step_3_progress_summary', progressSummary, 'caption'),
-    ...mkInfoRow('launch_step_3_state', statusIcon(stateForIcon === 'deploying' || stateForIcon === 'verifying' ? 'running' : stateForIcon), '결과', {
-      kind: 'text',
-      text: quickDeployStateLabel(state),
-    }).components,
-    ...mkInfoRow('launch_step_3_stage', 'route', '현재 단계', {
-      kind: 'text',
-      text: currentStage,
-    }).components,
-    ...mkInfoRow('launch_step_3_last', 'history', '최근 메시지', {
-      kind: 'text',
-      text: lastMessage,
-    }).components,
-    mkDivider('launch_step_3_div_events'),
-    mkText('launch_step_3_events_title', '최근 이벤트', 'h4'),
-    ...eventRows,
-    mkText('launch_step_3_detail_text', '상세 보기'),
-    mkButton(
-      'launch_step_3_detail_btn',
-      'launch_step_3_detail_text',
-      'open_deployments_page',
-      {
-        deploymentId: resultDeploymentId || sourceDeploymentId,
-        deployRunId,
-        serviceId,
-        environment,
-        view: 'quick_deploy_result',
-      },
-    ),
-    mkText('launch_step_3_refresh_text', '상태 갱신'),
-    mkButton(
-      'launch_step_3_refresh_btn',
-      'launch_step_3_refresh_text',
-      'refresh_deploy_status',
-      {
-        deployRunId,
-        deploymentId: resultDeploymentId || sourceDeploymentId,
-        serviceId,
-        environment,
-      },
-      true,
-    ),
-    ...(rollbackReady
-      ? [
-          mkText('launch_step_3_rollback_text', '롤백 후보 보기'),
+        const components: A2UIComponent[] = [
+          mkText('launch_step_3_label', 'Step 3', 'caption'),
+          mkText('launch_step_3_title', rollbackReady ? '결과 확인 및 롤백 준비' : '결과 확인', 'h3'),
+          mkText(
+            'launch_step_3_detail',
+            rollbackReady
+              ? '배포가 실패했습니다. 롤백 후보를 바로 확인할 수 있습니다.'
+              : '실행 진행률과 최근 이벤트를 보고 다음 상태 전이를 확인합니다.',
+            'caption',
+          ),
+          mkIcon('launch_step_3_done_icon', uiState.step3.showCompletedBadge ? statusIcon(uiState.overallState) : statusIcon('running')),
+          mkText('launch_step_3_done_status', step3BadgeText, 'caption'),
+          ...progressComponents,
+          ...mkInfoRow('launch_step_3_state', statusIcon(stateForIcon === 'deploying' || stateForIcon === 'verifying' ? 'running' : stateForIcon), '결과', {
+            kind: 'text',
+            text: quickDeployStateLabel(state),
+          }).components,
+          ...mkInfoRow('launch_step_3_stage', 'route', '현재 단계', {
+            kind: 'text',
+            text: quickDeployStageLabel(currentStage),
+          }).components,
+          ...mkInfoRow('launch_step_3_last', 'history', '최근 메시지', {
+            kind: 'text',
+            text: lastMessage,
+          }).components,
+          mkDivider('launch_step_3_div_events'),
+          mkText('launch_step_3_events_title', '최근 이벤트', 'h4'),
+          ...eventRows,
+          mkText('launch_step_3_detail_text', '상세 보기'),
           mkButton(
-            'launch_step_3_rollback_btn',
-            'launch_step_3_rollback_text',
-            'open_rollback_candidates',
+            'launch_step_3_detail_btn',
+            'launch_step_3_detail_text',
+            'open_deployments_page',
             {
               deploymentId: resultDeploymentId || sourceDeploymentId,
               deployRunId,
               serviceId,
               environment,
+              view: 'quick_deploy_result',
             },
+            false,
           ),
-        ]
-      : []),
-    mkRow('launch_step_3_actions', step3ActionIds, 'end'),
-    mkCol('launch_step_3_col', [
-      'launch_step_3_label',
-      'launch_step_3_title',
-      'launch_step_3_detail',
-      'launch_step_3_progress_label',
-      'launch_step_3_progress_bar',
-      'launch_step_3_progress_summary',
-      'launch_step_3_state_row',
-      'launch_step_3_stage_row',
-      'launch_step_3_last_row',
-      'launch_step_3_div_events',
-      'launch_step_3_events_title',
-      ...eventRowIds,
-      'launch_step_3_actions',
-    ]),
-    mkCard('launch_step_3_card', 'launch_step_3_col'),
-  ];
+          mkText('launch_step_3_refresh_text', '상태 갱신'),
+          mkButton(
+            'launch_step_3_refresh_btn',
+            'launch_step_3_refresh_text',
+            'refresh_deploy_status',
+            {
+              deployRunId,
+              deploymentId: resultDeploymentId || sourceDeploymentId,
+              serviceId,
+              environment,
+            },
+            true,
+          ),
+        ];
+
+        if (rollbackReady && !inlineRollback) {
+          step3ActionIds.push('launch_step_3_rollback_btn');
+          components.push(
+            mkText('launch_step_3_rollback_text', '롤백 후보 보기'),
+            mkButton(
+              'launch_step_3_rollback_btn',
+              'launch_step_3_rollback_text',
+              'open_rollback_candidates',
+              {
+                deploymentId: resultDeploymentId || sourceDeploymentId,
+                deployRunId,
+                serviceId,
+                environment,
+              },
+            ),
+          );
+        }
+
+        if (inlineRollback) {
+          step3CardChildren.push(inlineRollback.childId);
+          components.push(...inlineRollback.components);
+        }
+
+        components.push(
+          mkRow('launch_step_3_actions', step3ActionIds, 'end'),
+          mkCol('launch_step_3_col', step3CardChildren),
+          mkCard('launch_step_3_card', 'launch_step_3_col'),
+        );
+        return components;
+      })()
+    : [
+        mkText('launch_step_3_label', 'Step 3', 'caption'),
+        mkText('launch_step_3_title', rollbackReady ? '결과 대기 및 롤백 준비' : '결과 확인', 'h3'),
+        mkText(
+          'launch_step_3_detail',
+          rollbackReady
+            ? '배포가 실패했습니다. 롤백 후보를 바로 확인할 수 있습니다.'
+            : '배포가 시작되면 진행률과 최근 이벤트가 여기에 표시됩니다.',
+          'caption',
+        ),
+        mkText(
+          'launch_step_3_summary',
+          `${quickDeployStateLabel(uiState.overallState)} · ${uiState.progressPercent}% · ${quickDeployStageLabel(uiState.currentStage)}`,
+          'body',
+        ),
+        mkIcon('launch_step_3_done_icon', uiState.step3.showCompletedBadge ? statusIcon(uiState.overallState) : statusIcon('running')),
+        mkText('launch_step_3_done_status', step3BadgeText, 'caption'),
+        mkCol('launch_step_3_col', [
+          'launch_step_3_label',
+          'launch_step_3_title',
+          'launch_step_3_detail',
+          'launch_step_3_summary',
+          'launch_step_3_done_icon',
+          'launch_step_3_done_status',
+        ]),
+        mkCard('launch_step_3_card', 'launch_step_3_col'),
+      ];
 
   const components: A2UIComponent[] = [
     ...headerComponents,
@@ -2777,11 +3337,32 @@ export function buildQuickDeployLaunchpadCard(cardData: Record<string, unknown>)
         sourceDeploymentId,
         sourceVersion,
         strategy,
-        state,
-        progressPercent,
-        currentStage,
+        state: uiState.overallState,
+        progressPercent: uiState.progressPercent,
+        currentStage: uiState.currentStage,
         lastMessage,
       },
+      uiHints: uiHints
+        ? {
+            focusStep: uiHints.focusStep ?? null,
+            flashCompletedStep: uiHints.flashCompletedStep ?? null,
+            collapseCompletedSteps: uiHints.collapseCompletedSteps ?? true,
+            animateProgress: uiHints.animateProgress ?? true,
+          }
+        : null,
+      localActionState: localActionState
+        ? {
+            pendingAction: localActionState.pendingAction ?? null,
+            pendingStep: localActionState.pendingStep ?? null,
+            label: localActionState.label ?? null,
+          }
+        : null,
+      actionFeedback: actionFeedback
+        ? {
+            status: actionFeedback.status ?? null,
+            message: actionFeedback.message ?? null,
+          }
+        : null,
       artifact: {
         id: artifactId || null,
         imageTag,
@@ -2791,11 +3372,24 @@ export function buildQuickDeployLaunchpadCard(cardData: Record<string, unknown>)
       deployRun: {
         id: deployRunId || null,
         status: runStatus,
-        progressPercent,
-        currentStage,
+        progressPercent: uiState.progressPercent,
+        currentStage: uiState.currentStage,
         lastMessage,
         resultDeploymentId: resultDeploymentId || null,
       },
+      rollbackPreview: rollbackPreview
+        ? {
+            candidates: normalizeRollbackCandidates(rollbackPreview).map((candidate) => ({
+              id: candidate['id'] ?? candidate['deployment_id'] ?? '',
+              service_id: pickText(candidate, ['service_id', 'service', 'service_name'], serviceName),
+              version: pickText(candidate, ['version', 'current_version', 'currentVersion']),
+              previous_version: pickText(candidate, ['previous_version', 'previousVersion', 'target_version']),
+              environment: pickText(candidate, ['environment', 'env'], environment),
+              status: candidateStatusLabel(candidate),
+              candidate_role: pickText(candidate, ['candidate_role'], 'history'),
+            })),
+          }
+        : null,
       runEvents: runEvents.map((event) => ({
         stage: asText(event['stage'], 'event'),
         detail: asText(event['detail'], ''),

@@ -1489,7 +1489,16 @@ export function getChatMessages(threadId: string) {
 
 export function saveChatMessage(id: string, threadId: string, role: string, content: string, toolName?: string, toolResult?: string) {
   getDb()
-    .prepare('INSERT INTO chat_messages (id, thread_id, role, content, tool_name, tool_result) VALUES (?, ?, ?, ?, ?, ?)')
+    .prepare(`
+      INSERT INTO chat_messages (id, thread_id, role, content, tool_name, tool_result)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        thread_id = excluded.thread_id,
+        role = excluded.role,
+        content = excluded.content,
+        tool_name = excluded.tool_name,
+        tool_result = excluded.tool_result
+    `)
     .run(id, threadId, role, content, toolName ?? null, toolResult ?? null);
   return getDb().prepare('SELECT * FROM chat_messages WHERE id = ?').get(id);
 }

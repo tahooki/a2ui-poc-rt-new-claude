@@ -283,36 +283,43 @@
     opacity: 1;
   }
 
-  .ops-a2ui .a2ui-button button {
+  .ops-a2ui.a2ui-surface .a2ui-button button {
+    all: unset;
+    display: inline-block;
     min-height: 2.5rem;
-    padding: 0.62rem 0.95rem;
-    border: 1px solid color-mix(in oklch, var(--border) 78%, transparent);
-    border-radius: calc(var(--radius) * 1.1);
-    background: color-mix(in oklch, var(--secondary) 70%, transparent);
-    color: var(--foreground);
+    padding: 0.62rem 1.1rem;
+    border: 1px solid hsl(0 0% 35%);
+    border-radius: 8px;
+    background: hsl(0 0% 18%);
+    color: #e5e5e5;
     cursor: pointer;
+    font-size: 0.875rem;
+    font-weight: 500;
+    line-height: 1.4;
+    box-sizing: border-box;
     transition:
       background-color 180ms ease,
       border-color 180ms ease,
-      transform 180ms ease,
+      transform 120ms ease,
       box-shadow 180ms ease;
   }
 
-  .ops-a2ui .a2ui-button button:hover {
-    border-color: color-mix(in oklch, var(--primary) 36%, transparent);
-    background: color-mix(in oklch, var(--accent) 82%, transparent);
-    box-shadow: 0 8px 20px rgb(0 0 0 / 0.14);
+  .ops-a2ui.a2ui-surface .a2ui-button button:hover {
+    border-color: hsl(0 0% 50%);
+    background: hsl(0 0% 24%);
+    box-shadow: 0 4px 12px rgb(0 0 0 / 0.3);
     transform: translateY(-1px);
   }
 
-  .ops-a2ui .a2ui-button button:focus-visible,
-  .ops-a2ui .a2ui-tabs button:focus-visible {
-    outline: 2px solid color-mix(in oklch, var(--primary) 66%, white 34%);
+  .ops-a2ui.a2ui-surface .a2ui-button button:focus-visible,
+  .ops-a2ui.a2ui-surface .a2ui-tabs button:focus-visible {
+    outline: 2px solid hsl(0 0% 50%);
     outline-offset: 2px;
   }
 
-  .ops-a2ui .a2ui-button button .a2ui-text p {
+  .ops-a2ui.a2ui-surface .a2ui-button button .a2ui-text p {
     font-weight: 600;
+    margin: 0;
   }
 
   [data-card-type="rollback_action"] .ops-a2ui .a2ui-list[data-direction="vertical"] > section {
@@ -362,8 +369,8 @@
     gap: 0.45rem;
   }
 
-  [data-card-type="deployment_approval_inbox"] .ops-a2ui .a2ui-button button,
-  [data-card-type="quick_deploy_launchpad"] .ops-a2ui .a2ui-button button {
+  [data-card-type="deployment_approval_inbox"] .ops-a2ui.a2ui-surface .a2ui-button button,
+  [data-card-type="quick_deploy_launchpad"] .ops-a2ui.a2ui-surface .a2ui-button button {
     min-width: 5.4rem;
   }
 

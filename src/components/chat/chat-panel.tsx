@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
-import { Send, X, Bot, Loader2 } from "lucide-react";
+import { Send, X, Bot, Loader2, RotateCcw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -23,6 +23,18 @@ interface ScenarioQuestionSuggestion {
   id: string;
   question: string;
 }
+
+type A2UIRenderEnvelope = {
+  type: "a2ui_render";
+  cardType: string;
+  cardData: Record<string, unknown>;
+};
+
+type LocalActionState = {
+  pendingAction?: string;
+  pendingStep?: 1 | 2 | 3;
+  label?: string;
+};
 
 const PAGE_SUGGESTIONS: Record<string, string[]> = {
   "/dashboard": [
@@ -83,6 +95,16 @@ function getChatPage(pathname: string): string {
 }
 
 /** Convert a DB message row into a UIMessage for the useChat hook. */
+function isA2UIRenderEnvelope(value: unknown): value is A2UIRenderEnvelope {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as Record<string, unknown>).type === "a2ui_render" &&
+    typeof (value as Record<string, unknown>).cardType === "string" &&
+    typeof (value as Record<string, unknown>).cardData === "object"
+  );
+}
+
 function dbMessageToUIMessage(row: {
   id: string;
   role: string;
@@ -99,13 +121,7 @@ function dbMessageToUIMessage(row: {
   if (row.tool_name && row.tool_result) {
     try {
       const parsed = JSON.parse(row.tool_result) as unknown;
-      if (
-        typeof parsed === "object" &&
-        parsed !== null &&
-        (parsed as Record<string, unknown>).type === "a2ui_render" &&
-        typeof (parsed as Record<string, unknown>).cardType === "string" &&
-        typeof (parsed as Record<string, unknown>).cardData === "object"
-      ) {
+      if (isA2UIRenderEnvelope(parsed)) {
         parts.push({
           type: "dynamic-tool" as const,
           toolName: row.tool_name,
@@ -136,25 +152,119 @@ function extractTextContent(message: UIMessage): string {
 }
 
 function buildA2UIActionMessage(input: {
+  id?: string;
+  toolCallId?: string;
   actionName: string;
   message: string;
-  payload: { type: "a2ui_render"; cardType: string; cardData: Record<string, unknown> };
+  payload: A2UIRenderEnvelope;
   context: Record<string, string>;
 }): UIMessage {
   return {
-    id: crypto.randomUUID(),
+    id: input.id ?? crypto.randomUUID(),
     role: "assistant",
     parts: [
       { type: "text" as const, text: input.message },
       {
         type: "dynamic-tool" as const,
         toolName: input.actionName,
-        toolCallId: `a2ui-${Date.now()}`,
+        toolCallId: input.toolCallId ?? `a2ui-${Date.now()}`,
         state: "output-available" as const,
         input: input.context,
         output: input.payload,
       },
     ],
+  };
+}
+
+function updateInteractiveToolPart(
+  messages: UIMessage[],
+  sourceMessageId: string,
+  sourceToolCallId: string,
+  updater: (payload: A2UIRenderEnvelope) => A2UIRenderEnvelope,
+  nextText?: string,
+): UIMessage[] {
+  return messages.map((message) => {
+    if (message.id !== sourceMessageId) return message;
+
+    const nextParts = message.parts.map((part) => {
+      if (part.type !== "dynamic-tool") return part;
+      if (part.toolCallId !== sourceToolCallId) return part;
+      if (!isA2UIRenderEnvelope(part.output)) return part;
+
+      return {
+        ...part,
+        output: updater(part.output),
+      } as typeof part;
+    }) as UIMessage["parts"];
+
+    if (!nextText) {
+      return { ...message, parts: nextParts };
+    }
+
+    const hasTextPart = nextParts.some((part) => part.type === "text");
+    const partsWithText = hasTextPart
+      ? nextParts.map((part) =>
+          part.type === "text" ? { ...part, text: nextText } : part,
+        )
+      : [{ type: "text" as const, text: nextText }, ...nextParts];
+
+    return {
+      ...message,
+      parts: partsWithText as UIMessage["parts"],
+    };
+  });
+}
+
+function buildLocalActionState(actionName: string): LocalActionState | null {
+  switch (actionName) {
+    case "build_deploy_artifact":
+      return {
+        pendingAction: actionName,
+        pendingStep: 1,
+        label: "이미지 생성 중...",
+      };
+    case "start_deploy_run":
+      return {
+        pendingAction: actionName,
+        pendingStep: 2,
+        label: "배포 시작 중...",
+      };
+    case "refresh_deploy_status":
+      return {
+        pendingAction: actionName,
+        pendingStep: 3,
+        label: "상태 갱신 중...",
+      };
+    case "open_rollback_candidates":
+      return {
+        pendingAction: actionName,
+        pendingStep: 3,
+        label: "롤백 후보 조회 중...",
+      };
+    default:
+      return null;
+  }
+}
+
+function applyOptimisticActionState(
+  payload: A2UIRenderEnvelope,
+  actionName: string,
+): A2UIRenderEnvelope {
+  const localActionState = buildLocalActionState(actionName);
+  if (!localActionState) {
+    return payload;
+  }
+
+  return {
+    ...payload,
+    cardData: {
+      ...payload.cardData,
+      localActionState,
+      actionFeedback: {
+        status: "pending",
+        message: localActionState.label,
+      },
+    },
   };
 }
 
@@ -164,6 +274,7 @@ export function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
   const { selectedEntityId } = useSelectedEntity();
   const [inputValue, setInputValue] = useState("");
   const [scenarioSuggestions, setScenarioSuggestions] = useState<string[] | null>(null);
+  const [isResetting, setIsResetting] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -397,8 +508,44 @@ export function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
     sendMessage({ text: suggestion });
   }
 
+  function resetInteractiveState() {
+    threadIdRef.current = null;
+    savedMessageIdsRef.current = new Set();
+    setMessages([]);
+    setScenarioSuggestions(null);
+    setInputValue("");
+  }
+
+  async function handleDemoReset() {
+    if (!currentOperator || isResetting) return;
+
+    setIsResetting(true);
+    try {
+      const res = await fetch("/api/admin", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "reset" }),
+      });
+
+      if (!res.ok) {
+        throw new Error(`Reset request failed: ${res.status}`);
+      }
+
+      resetInteractiveState();
+    } catch (err) {
+      console.error("[ChatPanel] Failed to reset demo:", err);
+    } finally {
+      setIsResetting(false);
+    }
+  }
+
   const handleA2UIAction = useCallback(
-    async (actionName: string, context: Record<string, unknown>) => {
+    async (
+      actionName: string,
+      context: Record<string, unknown>,
+      sourceMessageId: string,
+      sourceToolCallId: string,
+    ) => {
       if (!currentOperator) return;
 
       // Convert context values to strings (A2UI context uses literalString format)
@@ -408,6 +555,16 @@ export function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
       }
 
       try {
+        setMessages((current) =>
+          updateInteractiveToolPart(
+            current,
+            sourceMessageId,
+            sourceToolCallId,
+            (payload) => applyOptimisticActionState(payload, actionName),
+            `[A2UI 작업 진행 중] ${buildLocalActionState(actionName)?.label ?? actionName}`,
+          ),
+        );
+
         const res = await fetch("/api/a2ui-action", {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -428,18 +585,25 @@ export function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
           typeof (result.data as Record<string, unknown>).cardType === "string" &&
           typeof (result.data as Record<string, unknown>).cardData === "object"
         ) {
+          const renderPayload = result.data as A2UIRenderEnvelope;
           const assistantMessage = buildA2UIActionMessage({
+            id: sourceMessageId,
+            toolCallId: sourceToolCallId,
             actionName,
             message: `[A2UI 작업 완료] ${result.message ?? "작업이 완료되었습니다."}`,
-            payload: result.data as {
-              type: "a2ui_render";
-              cardType: string;
-              cardData: Record<string, unknown>;
-            },
+            payload: renderPayload,
             context: stringContext,
           });
 
-          setMessages((current) => [...current, assistantMessage]);
+          setMessages((current) =>
+            updateInteractiveToolPart(
+              current,
+              sourceMessageId,
+              sourceToolCallId,
+              () => renderPayload,
+              extractTextContent(assistantMessage),
+            ),
+          );
 
           let threadId = threadIdRef.current;
           if (!threadId) {
@@ -485,12 +649,50 @@ export function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
             text: `[A2UI 작업 완료] ${result.message}`,
           });
         } else if (result.error) {
+          setMessages((current) =>
+            updateInteractiveToolPart(
+              current,
+              sourceMessageId,
+              sourceToolCallId,
+              (payload) => ({
+                ...payload,
+                cardData: {
+                  ...payload.cardData,
+                  actionFeedback: {
+                    status: "error",
+                    message: String(result.error),
+                  },
+                  localActionState: null,
+                },
+              }),
+              `[A2UI 작업 실패] ${result.error}`,
+            ),
+          );
           sendMessage({
             text: `[A2UI 작업 실패] ${result.error}`,
           });
         }
       } catch (err) {
         console.error("[A2UI Action Error]", err);
+        setMessages((current) =>
+          updateInteractiveToolPart(
+            current,
+            sourceMessageId,
+            sourceToolCallId,
+            (payload) => ({
+              ...payload,
+              cardData: {
+                ...payload.cardData,
+                actionFeedback: {
+                  status: "error",
+                  message: `작업 실행 중 오류가 발생했습니다: ${actionName}`,
+                },
+                localActionState: null,
+              },
+            }),
+            `[A2UI 작업 오류] 작업 실행 중 오류가 발생했습니다: ${actionName}`,
+          ),
+        );
         sendMessage({
           text: `[A2UI 작업 오류] 작업 실행 중 오류가 발생했습니다: ${actionName}`,
         });
@@ -535,6 +737,18 @@ export function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
               </span>
             </div>
           </div>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-7 gap-1.5 px-2.5 text-[11px] text-muted-foreground hover:text-foreground shrink-0"
+            onClick={handleDemoReset}
+            disabled={!currentOperator || isLoading || isResetting}
+            aria-label="데모 초기화"
+          >
+            <RotateCcw className={cn("h-3.5 w-3.5", isResetting && "animate-spin")} />
+            <span>데모 초기화</span>
+          </Button>
           <Button
             variant="ghost"
             size="icon"

@@ -37,6 +37,12 @@ interface ActionRequest {
   actorId: string;
 }
 
+type A2UIRenderPayload = {
+  type: 'a2ui_render';
+  cardType: string;
+  cardData: Record<string, unknown>;
+};
+
 function createDeploymentRecordFromRequest(input: {
   request: Record<string, unknown>;
   actorId: string;
@@ -161,6 +167,59 @@ function resolveQuickDeployDeploymentContext(input: {
   return { baseline, artifact, run, deploymentId };
 }
 
+function getQuickDeployPreviewContext(actorId: string) {
+  const operator = getOperator(actorId) as Record<string, unknown> | undefined;
+
+  return {
+    actorId,
+    actorRole: String(operator?.['role'] ?? 'ops_engineer'),
+    page: 'deployments',
+  };
+}
+
+async function renderQuickDeployLaunchpadPreview(input: {
+  deploymentId: string;
+  actorId: string;
+  message: string;
+  uiHints?: Record<string, unknown>;
+  rollbackPreview?: Record<string, unknown> | null;
+}): Promise<{ message: string; data: A2UIRenderPayload | Record<string, unknown> }> {
+  const preview = await renderTemplatePreview({
+    templateId: 'tpl_quick_deploy_launchpad',
+    args: {
+      deploymentId: input.deploymentId,
+    },
+    context: getQuickDeployPreviewContext(input.actorId),
+    missingLabel: '간단 배포 시작',
+  });
+
+  if (
+    preview.output &&
+    typeof preview.output === 'object' &&
+    'type' in preview.output &&
+    (preview.output as Record<string, unknown>).type === 'a2ui_render'
+  ) {
+    const base = preview.output as A2UIRenderPayload;
+    const baseCardData = (base.cardData ?? {}) as Record<string, unknown>;
+    return {
+      message: input.message,
+      data: {
+        ...base,
+        cardData: {
+          ...baseCardData,
+          ...(input.uiHints ? { uiHints: input.uiHints } : {}),
+          ...(input.rollbackPreview ? { rollbackPreview: input.rollbackPreview } : {}),
+        },
+      },
+    };
+  }
+
+  return {
+    message: input.message,
+    data: preview.output as Record<string, unknown>,
+  };
+}
+
 // Internal fetch helper to call sibling API routes
 async function internalFetch(
   path: string,
@@ -280,6 +339,25 @@ const handlers: Record<
     if (lastResponse.status >= 400) {
       throw new Error(`롤백 실행 실패: ${JSON.stringify(lastResponse.data)}`);
     }
+
+    // Return re-rendered rollback action card
+    const serviceId = String(ctx.serviceId ?? deployment['service_id'] ?? '');
+    const environment = String(ctx.environment ?? deployment['environment'] ?? 'production');
+    const preview = await renderTemplatePreview({
+      templateId: 'tpl_rollback_action',
+      args: { deploymentId, serviceId, environment },
+      context: getQuickDeployPreviewContext(actorId),
+      missingLabel: '롤백 실행',
+    });
+    if (
+      preview.output &&
+      typeof preview.output === 'object' &&
+      'type' in preview.output &&
+      (preview.output as Record<string, unknown>).type === 'a2ui_render'
+    ) {
+      return { message: '롤백이 성공적으로 실행되었습니다.', data: preview.output };
+    }
+
     return { message: '롤백이 성공적으로 실행되었습니다.', data: lastResponse.data };
   },
 
@@ -391,13 +469,16 @@ const handlers: Record<
       createdBy: actorId,
     }) as Record<string, unknown> | undefined;
 
-    return {
+    return renderQuickDeployLaunchpadPreview({
+      deploymentId: baselineDeploymentId,
+      actorId,
       message: '이미지 생성이 완료되었습니다.',
-      data: {
-        baselineDeploymentId,
-        artifact,
+      uiHints: {
+        focusStep: 2,
+        collapseCompletedSteps: true,
+        flashCompletedStep: 1,
       },
-    };
+    });
   },
 
   async start_deploy_run(ctx, actorId, _req) {
@@ -481,17 +562,19 @@ const handlers: Record<
       progressPercent: 10,
     });
 
-    return {
+    return renderQuickDeployLaunchpadPreview({
+      deploymentId: baselineDeploymentId,
+      actorId,
       message: '배포가 시작되었습니다.',
-      data: {
-        artifact,
-        deployRun: run,
-        deploymentId,
+      uiHints: {
+        focusStep: 3,
+        collapseCompletedSteps: true,
+        flashCompletedStep: 2,
       },
-    };
+    });
   },
 
-  async refresh_deploy_status(ctx, _actorId, _req) {
+  async refresh_deploy_status(ctx, actorId, _req) {
     const resolved = resolveQuickDeployDeploymentContext({
       deploymentId: ctx.deploymentId,
       baselineDeploymentId: ctx.baselineDeploymentId,
@@ -544,14 +627,15 @@ const handlers: Record<
       progressPercent: step.progress,
     });
 
-    return {
+    return renderQuickDeployLaunchpadPreview({
+      deploymentId: String(resolved.deploymentId || deploymentId),
+      actorId,
       message: '배포 상태를 갱신했습니다.',
-      data: {
-        deployRun: updatedRun,
-        artifact: resolved.artifact,
-        deploymentId,
+      uiHints: {
+        focusStep: 3,
+        animateProgress: true,
       },
-    };
+    });
   },
 
   async open_rollback_candidates(ctx, actorId, _req) {
@@ -565,36 +649,40 @@ const handlers: Record<
     const targetDeploymentId =
       String(resolved.run?.['result_deployment_id'] ?? resolved.deploymentId ?? ctx.deploymentId ?? '');
     if (!targetDeploymentId) {
-      return {
+      return renderQuickDeployLaunchpadPreview({
+        deploymentId: String(ctx.baselineDeploymentId ?? ctx.deploymentId ?? ''),
+        actorId,
         message: '롤백 후보를 찾지 못했습니다.',
-        data: {
-          type: 'a2ui_render',
-          cardType: 'rollback_action',
-          cardData: {
-            deploymentId: '',
-            serviceId: '',
-            environment: '',
-            candidates: [],
-          },
+        uiHints: {
+          focusStep: 3,
+          collapseCompletedSteps: true,
         },
-      };
+        rollbackPreview: {
+          deploymentId: '',
+          serviceId: '',
+          environment: '',
+          candidates: [],
+        },
+      });
     }
 
     const deployment = getDeployment(targetDeploymentId) as Record<string, unknown> | undefined;
     if (!deployment) {
-      return {
+      return renderQuickDeployLaunchpadPreview({
+        deploymentId: String(ctx.baselineDeploymentId ?? ctx.deploymentId ?? targetDeploymentId),
+        actorId,
         message: '롤백 후보를 찾지 못했습니다.',
-        data: {
-          type: 'a2ui_render',
-          cardType: 'rollback_action',
-          cardData: {
-            deploymentId: targetDeploymentId,
-            serviceId: '',
-            environment: '',
-            candidates: [],
-          },
+        uiHints: {
+          focusStep: 3,
+          collapseCompletedSteps: true,
         },
-      };
+        rollbackPreview: {
+          deploymentId: targetDeploymentId,
+          serviceId: '',
+          environment: '',
+          candidates: [],
+        },
+      });
     }
 
     const preview = await renderTemplatePreview({
@@ -602,22 +690,33 @@ const handlers: Record<
       args: {
         deploymentId: targetDeploymentId,
       },
-      // Reuse the seeded rollback candidate source and preserve the current operator context.
-      context: (() => {
-        const operator = getOperator(actorId) as Record<string, unknown> | undefined;
-        return {
-          actorId,
-          actorRole: String(operator?.['role'] ?? 'ops_engineer'),
-          page: 'deployments',
-        };
-      })(),
+      context: getQuickDeployPreviewContext(actorId),
       missingLabel: '롤백 실행',
     });
 
-    return {
-      message: '롤백 후보를 확인했습니다. 롤백 실행 카드를 열었습니다.',
-      data: preview.output,
-    };
+    const rollbackPreview =
+      preview.output &&
+      typeof preview.output === 'object' &&
+      'type' in preview.output &&
+      (preview.output as Record<string, unknown>).type === 'a2ui_render'
+        ? ((preview.output as A2UIRenderPayload).cardData as Record<string, unknown>)
+        : {
+            deploymentId: targetDeploymentId,
+            serviceId: '',
+            environment: '',
+            candidates: [],
+          };
+
+    return renderQuickDeployLaunchpadPreview({
+      deploymentId: String(ctx.baselineDeploymentId ?? ctx.deploymentId ?? targetDeploymentId),
+      actorId,
+      message: '롤백 후보를 확인했습니다. 롤백 실행 카드를 이어서 표시합니다.',
+      uiHints: {
+        focusStep: 3,
+        collapseCompletedSteps: true,
+      },
+      rollbackPreview,
+    });
   },
 
   async approve_deploy_request(ctx, actorId, _req) {
