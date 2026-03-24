@@ -659,13 +659,12 @@ function applyPreviewCardAction(
   );
 
   const updateCandidateStatus = (
-    collectionKey: "candidates" | "requests",
+    collectionKey: string,
     matcher: (item: Record<string, unknown>) => boolean,
     patch: Record<string, unknown>,
   ) => {
-    const items = Array.isArray(next.cardData[collectionKey])
-      ? (next.cardData[collectionKey] as Array<Record<string, unknown>>)
-      : [];
+    if (!Array.isArray(next.cardData[collectionKey])) return;
+    const items = next.cardData[collectionKey] as Array<Record<string, unknown>>;
     next.cardData[collectionKey] = items.map((item) =>
       matcher(item) ? { ...item, ...patch } : item,
     );
@@ -776,31 +775,47 @@ function applyPreviewCardAction(
 
     case "approve_deployment_request":
     case "approve_deploy_request": {
-      updateCandidateStatus(
-        "requests",
-        (item) => String(item.status ?? item.state ?? "") === "approval_requested",
-        {
-          status: "approved",
-          state: "approved",
-          recentSignals: ["승인완료"],
-          recent_signal: "승인완료",
-        },
+      const approveTargetId = String(
+        actionContext.requestId ?? actionContext.candidateId ?? actionContext.deploymentId ?? "",
       );
+      const approveMatcher = (item: Record<string, unknown>) => {
+        const s = String(item.status ?? item.state ?? "");
+        const id = String(item.id ?? item.request_id ?? item.deployment_id ?? "");
+        const isPending = ["approval_requested", "approval_pending", "draft"].includes(s);
+        return approveTargetId ? id === approveTargetId : isPending;
+      };
+      const approvePatch = {
+        status: "approved",
+        state: "approved",
+        recentSignals: ["승인완료"],
+        recent_signal: "승인완료",
+      };
+      updateCandidateStatus("candidates", approveMatcher, approvePatch);
+      updateCandidateStatus("requests", approveMatcher, approvePatch);
+      updateCandidateStatus("items", approveMatcher, approvePatch);
       return { next, message: "미리보기에서 배포 요청이 승인완료 상태로 변경됐습니다." };
     }
 
     case "hold_deployment_request":
     case "hold_deploy_request": {
-      updateCandidateStatus(
-        "requests",
-        (item) => String(item.status ?? item.state ?? "") === "approval_requested",
-        {
-          status: "held",
-          state: "held",
-          recentSignals: ["승인 대기에서 보류 상태로 전환됨"],
-          recent_signal: "승인 대기에서 보류 상태로 전환됨",
-        },
+      const holdTargetId = String(
+        actionContext.requestId ?? actionContext.candidateId ?? actionContext.deploymentId ?? "",
       );
+      const holdMatcher = (item: Record<string, unknown>) => {
+        const s = String(item.status ?? item.state ?? "");
+        const id = String(item.id ?? item.request_id ?? item.deployment_id ?? "");
+        const isPending = ["approval_requested", "approval_pending", "draft"].includes(s);
+        return holdTargetId ? id === holdTargetId : isPending;
+      };
+      const holdPatch = {
+        status: "held",
+        state: "held",
+        recentSignals: ["승인 대기에서 보류 상태로 전환됨"],
+        recent_signal: "승인 대기에서 보류 상태로 전환됨",
+      };
+      updateCandidateStatus("candidates", holdMatcher, holdPatch);
+      updateCandidateStatus("requests", holdMatcher, holdPatch);
+      updateCandidateStatus("items", holdMatcher, holdPatch);
       return { next, message: "미리보기에서 배포 요청을 보류 상태로 변경했습니다." };
     }
 
@@ -1302,8 +1317,18 @@ export default function TemplatesPage() {
         if (payload.success) {
           // Server succeeded but didn't return a re-rendered card — apply local state update as fallback
           setPreviewInteractiveState((current) => {
-            if (!current) return current;
-            const result = applyPreviewCardAction(current, actionName, context);
+            const base = current ?? (() => {
+              const src = simulationResult?.preview ?? previewResult?.preview;
+              if (src && typeof src === "object" && "cardType" in src && "cardData" in src) {
+                return {
+                  cardType: String(src.cardType ?? ""),
+                  cardData: JSON.parse(JSON.stringify(src.cardData ?? {})) as Record<string, unknown>,
+                };
+              }
+              return null;
+            })();
+            if (!base) return current;
+            const result = applyPreviewCardAction(base, actionName, context);
             pendingActionMessageRef.current = payload.message ?? result.message;
             return result.next;
           });
@@ -1321,8 +1346,18 @@ export default function TemplatesPage() {
         console.error("[TemplatesPage] Server action failed:", actionName, error);
         // On server error, still try local state update for UI feedback
         setPreviewInteractiveState((current) => {
-          if (!current) return current;
-          const result = applyPreviewCardAction(current, actionName, context);
+          const base = current ?? (() => {
+            const src = simulationResult?.preview ?? previewResult?.preview;
+            if (src && typeof src === "object" && "cardType" in src && "cardData" in src) {
+              return {
+                cardType: String(src.cardType ?? ""),
+                cardData: JSON.parse(JSON.stringify(src.cardData ?? {})) as Record<string, unknown>,
+              };
+            }
+            return null;
+          })();
+          if (!base) return current;
+          const result = applyPreviewCardAction(base, actionName, context);
           pendingActionMessageRef.current = result.message;
           return result.next;
         });
@@ -1452,6 +1487,7 @@ export default function TemplatesPage() {
           role: simulatorRole,
           scenarioId: data?.currentScenarioId,
           operatorId: currentOperator?.id,
+          templateId: selectedId || undefined,
         }),
       });
       const payload = (await res.json()) as TemplateSimulationResponse;
@@ -1470,7 +1506,7 @@ export default function TemplatesPage() {
             : payload.diagnostics.reason ?? undefined,
         },
       ]);
-      if (payload.selectedTemplate?.id) {
+      if (payload.selectedTemplate?.id && !selectedId) {
         setSelectedId(payload.selectedTemplate.id);
       }
     } finally {

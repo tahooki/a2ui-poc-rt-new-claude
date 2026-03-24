@@ -47,6 +47,11 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Question is required" }, { status: 400 });
     }
 
+    const forcedTemplateId =
+      typeof body?.templateId === "string" && body.templateId.trim().length > 0
+        ? body.templateId.trim()
+        : null;
+
     const candidates = listEnabledA2UITemplates(
       {
         page,
@@ -62,7 +67,9 @@ export async function POST(req: NextRequest) {
         return left.name.localeCompare(right.name, "ko");
       });
 
-    const selected = candidates[0] ?? null;
+    const selected = forcedTemplateId
+      ? candidates.find((c) => c.id === forcedTemplateId) ?? candidates[0] ?? null
+      : candidates[0] ?? null;
     if (!selected) {
       logA2UITemplateSelection({
         templateId: null,
